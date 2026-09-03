@@ -255,10 +255,10 @@ elif page == "✅ Παρουσίες":
             st.write("Τσέκαρε όσους ήταν **παρόντες**.")
             presence = {}
             for p in team_players:
-                presence[p["id"]] = st.checkbox(p["full_name"], value=True)
+                presence[p["id"]] = st.checkbox(p["full_name"], value=True, key=f"attendance_{training_date}_{p['id']}")
             submit_att = st.form_submit_button(
                 "Αποθήκευση παρουσιών", use_container_width=True
-           , key=f"attendance_{training_date}_{p['id']}")
+           )
 
         if submit_att:
             for p in team_players:
