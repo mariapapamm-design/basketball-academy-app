@@ -258,7 +258,7 @@ elif page == "✅ Παρουσίες":
                 presence[p["id"]] = st.checkbox(p["full_name"], value=True)
             submit_att = st.form_submit_button(
                 "Αποθήκευση παρουσιών", use_container_width=True
-            )
+           , key=f"attendance_{training_date}_{p['id']}")
 
         if submit_att:
             for p in team_players:
