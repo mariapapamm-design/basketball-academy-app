@@ -20,6 +20,11 @@ TEAMS = [
     "Ανδρικό",
 ]
 
+JERSEY_SIZES = [
+    "6", "8", "10", "12", "14", "16",
+    "XS", "S", "M", "L", "XL", "XXL"
+]
+
 st.set_page_config(
     page_title="Ταυροι Καλαμαριας Coaches",
     page_icon="🏀",
@@ -159,12 +164,7 @@ def can_access_payments():
 
 def get_players(active_only=True):
     sb = get_user_client()
-
-    query = (
-        sb.table("players")
-        .select("*")
-        .order("full_name")
-    )
+    query = sb.table("players").select("*").order("full_name")
 
     if active_only:
         query = query.eq("active", True)
@@ -172,7 +172,7 @@ def get_players(active_only=True):
     return query.execute().data or []
 
 
-def format_birth_date(value):
+def format_date(value):
     if not value:
         return "—"
 
@@ -187,6 +187,17 @@ def format_money(value):
         return f"{float(value):.2f} €".replace(".", ",")
     except Exception:
         return "—"
+
+
+def player_display_name(player):
+    number = (player.get("jersey_number") or "").strip()
+    prefix = f"#{number} · " if number else ""
+    return f'{prefix}{player.get("full_name")} — {player.get("team") or "Χωρίς τμήμα"}'
+
+
+def player_short_name(player):
+    number = (player.get("jersey_number") or "").strip()
+    return f'#{number} {player.get("full_name")}' if number else player.get("full_name")
 
 
 def payment_status(last_paid_on):
@@ -280,7 +291,6 @@ if page == "🏠 Dashboard":
     )
 
     c1, c2, c3 = st.columns(3)
-
     c1.metric("Ενεργοί παίκτες", len(players))
     c2.metric("Καταχωρήσεις παρουσιών", total_records)
     c3.metric("Συνολική παρουσία", f"{attendance_pct}%")
@@ -293,8 +303,9 @@ if page == "🏠 Dashboard":
         for p in players:
             rows.append(
                 {
+                    "Νο": p.get("jersey_number") or "—",
                     "Ονοματεπώνυμο": p.get("full_name"),
-                    "Ημερομηνία Γέννησης": format_birth_date(
+                    "Ημερομηνία Γέννησης": format_date(
                         p.get("birth_date")
                     ),
                     "Τμήμα": p.get("team") or "—",
@@ -318,11 +329,15 @@ if page == "🏠 Dashboard":
 elif page == "👥 Παίκτες":
     st.title("Παίκτες")
 
-    tab1, tab2 = st.tabs(
-        ["Λίστα παικτών", "➕ Νέος παίκτης"]
+    tab_list, tab_new, tab_edit = st.tabs(
+        [
+            "Λίστα παικτών",
+            "➕ Νέος παίκτης",
+            "✏️ Edit / Διαγραφή",
+        ]
     )
 
-    with tab1:
+    with tab_list:
         players = get_players(active_only=False)
 
         if players:
@@ -331,11 +346,13 @@ elif page == "👥 Παίκτες":
             for p in players:
                 rows.append(
                     {
+                        "Νο": p.get("jersey_number") or "—",
                         "Ονοματεπώνυμο": p.get("full_name"),
-                        "Ημερομηνία Γέννησης": format_birth_date(
+                        "Ημερομηνία Γέννησης": format_date(
                             p.get("birth_date")
                         ),
                         "Τμήμα": p.get("team") or "—",
+                        "Μέγεθος Φανέλας": p.get("jersey_size") or "—",
                         "Active": bool(p.get("active", True)),
                     }
                 )
@@ -348,7 +365,7 @@ elif page == "👥 Παίκτες":
         else:
             st.info("Δεν υπάρχουν παίκτες.")
 
-    with tab2:
+    with tab_new:
         with st.form("new_player"):
             full_name = st.text_input("Ονοματεπώνυμο *")
 
@@ -363,6 +380,16 @@ elif page == "👥 Παίκτες":
             team = st.selectbox(
                 "Τμήμα",
                 TEAMS,
+            )
+
+            jersey_number = st.text_input(
+                "Νούμερο φανέλας",
+                placeholder="π.χ. 7, 23, 00",
+            )
+
+            jersey_size = st.selectbox(
+                "Μέγεθος φανέλας",
+                JERSEY_SIZES,
             )
 
             notes = st.text_area("Σημειώσεις")
@@ -381,6 +408,8 @@ elif page == "👥 Παίκτες":
                         "full_name": full_name.strip(),
                         "birth_date": str(birth_date),
                         "team": team,
+                        "jersey_number": jersey_number.strip() or None,
+                        "jersey_size": jersey_size,
                         "notes": notes.strip() or None,
                         "active": True,
                         "created_by": st.session_state.user.id,
@@ -388,6 +417,146 @@ elif page == "👥 Παίκτες":
                 ).execute()
 
                 st.success("Ο παίκτης προστέθηκε.")
+                st.rerun()
+
+    with tab_edit:
+        players = get_players(active_only=False)
+
+        if not players:
+            st.info("Δεν υπάρχουν παίκτες.")
+        else:
+            label_to_player = {
+                player_display_name(p): p
+                for p in players
+            }
+
+            selected_label = st.selectbox(
+                "Επίλεξε παίκτη",
+                list(label_to_player.keys()),
+                key="edit_player_select",
+            )
+
+            selected = label_to_player[selected_label]
+
+            current_birth = (
+                pd.to_datetime(selected.get("birth_date")).date()
+                if selected.get("birth_date")
+                else date(2012, 1, 1)
+            )
+
+            current_team = selected.get("team")
+            team_index = (
+                TEAMS.index(current_team)
+                if current_team in TEAMS
+                else 0
+            )
+
+            current_size = selected.get("jersey_size")
+            size_index = (
+                JERSEY_SIZES.index(current_size)
+                if current_size in JERSEY_SIZES
+                else 0
+            )
+
+            with st.form("edit_player_form"):
+                edit_name = st.text_input(
+                    "Ονοματεπώνυμο",
+                    value=selected.get("full_name") or "",
+                )
+
+                edit_birth = st.date_input(
+                    "Ημερομηνία Γέννησης",
+                    value=current_birth,
+                    min_value=date(1990, 1, 1),
+                    max_value=date.today(),
+                    format="DD/MM/YYYY",
+                )
+
+                edit_team = st.selectbox(
+                    "Τμήμα",
+                    TEAMS,
+                    index=team_index,
+                    key="edit_team",
+                )
+
+                edit_number = st.text_input(
+                    "Νούμερο φανέλας",
+                    value=selected.get("jersey_number") or "",
+                )
+
+                edit_size = st.selectbox(
+                    "Μέγεθος φανέλας",
+                    JERSEY_SIZES,
+                    index=size_index,
+                    key="edit_size",
+                )
+
+                edit_notes = st.text_area(
+                    "Σημειώσεις",
+                    value=selected.get("notes") or "",
+                )
+
+                edit_active = st.checkbox(
+                    "Active",
+                    value=bool(selected.get("active", True)),
+                )
+
+                save_edit = st.form_submit_button(
+                    "Αποθήκευση αλλαγών",
+                    use_container_width=True,
+                )
+
+            if save_edit:
+                if not edit_name.strip():
+                    st.error("Το ονοματεπώνυμο είναι υποχρεωτικό.")
+                else:
+                    (
+                        sb.table("players")
+                        .update(
+                            {
+                                "full_name": edit_name.strip(),
+                                "birth_date": str(edit_birth),
+                                "team": edit_team,
+                                "jersey_number": edit_number.strip() or None,
+                                "jersey_size": edit_size,
+                                "notes": edit_notes.strip() or None,
+                                "active": bool(edit_active),
+                            }
+                        )
+                        .eq("id", selected["id"])
+                        .execute()
+                    )
+
+                    st.success("Οι αλλαγές αποθηκεύτηκαν.")
+                    st.rerun()
+
+            st.divider()
+            st.subheader("Οριστική διαγραφή παίκτη")
+
+            st.warning(
+                "Η οριστική διαγραφή παίκτη διαγράφει μαζί και "
+                "τις παρουσίες και τις πληρωμές που συνδέονται με αυτόν."
+            )
+
+            confirm_delete = st.checkbox(
+                "Επιβεβαίωση διαγραφής",
+                key=f"confirm_player_delete_{selected['id']}",
+            )
+
+            if st.button(
+                "Διαγραφή παίκτη",
+                type="primary",
+                disabled=not confirm_delete,
+                use_container_width=True,
+            ):
+                (
+                    sb.table("players")
+                    .delete()
+                    .eq("id", selected["id"])
+                    .execute()
+                )
+
+                st.success("Ο παίκτης διαγράφηκε οριστικά.")
                 st.rerun()
 
 
@@ -411,7 +580,6 @@ elif page == "✅ Παρουσίες":
             }
         )
 
-        # Βάζουμε πρώτα τα επίσημα τμήματα και μετά τυχόν παλιά/διαφορετικά.
         teams = [
             t for t in TEAMS if t in player_teams
         ] + [
@@ -446,7 +614,7 @@ elif page == "✅ Παρουσίες":
 
             for p in team_players:
                 presence[p["id"]] = st.checkbox(
-                    p["full_name"],
+                    player_short_name(p),
                     value=True,
                     key=f"attendance_{training_date}_{p['id']}",
                 )
@@ -499,7 +667,7 @@ elif page == "✅ Παρουσίες":
             sb.table("attendance")
             .select(
                 "training_date,present,"
-                "players(full_name,team),"
+                "players(full_name,team,jersey_number),"
                 "profiles(full_name)"
             )
             .order("training_date", desc=True)
@@ -522,9 +690,10 @@ elif page == "✅ Παρουσίες":
 
             rows.append(
                 {
-                    "Ημερομηνία": format_birth_date(
+                    "Ημερομηνία": format_date(
                         r.get("training_date")
                     ),
+                    "Νο": player_data.get("jersey_number") or "—",
                     "Παίκτης": player_data.get("full_name"),
                     "Παρουσία": (
                         "✅ Παρών"
@@ -549,7 +718,7 @@ elif page == "✅ Παρουσίες":
 
 
 # ============================================================
-# ΠΛΗΡΩΜΕΣ - ΜΟΝΟ ΜΕ ΔΙΚΑΙΩΜΑ
+# ΠΛΗΡΩΜΕΣ
 # ============================================================
 
 elif page == "💳 Πληρωμές":
@@ -567,7 +736,7 @@ elif page == "💳 Πληρωμές":
 
     player_by_id = {p["id"]: p for p in players}
     label_to_id = {
-        f'{p["full_name"]} — {p.get("team") or "Χωρίς τμήμα"}': p["id"]
+        player_display_name(p): p["id"]
         for p in players
     }
 
@@ -597,17 +766,20 @@ elif page == "💳 Πληρωμές":
     )
 
     latest_by_player = {}
+
     for r in payment_rows:
         pid = r.get("player_id")
+
         if pid and pid not in latest_by_player:
             latest_by_player[pid] = r
 
-    tab_status, tab_record, tab_amount, tab_history = st.tabs(
+    tab_status, tab_record, tab_amount, tab_history, tab_edit = st.tabs(
         [
             "Κατάσταση",
             "➕ Καταχώρηση πληρωμής",
             "💶 Ποσό παίκτη",
             "Ιστορικό",
+            "✏️ Edit / Διαγραφή",
         ]
     )
 
@@ -624,13 +796,14 @@ elif page == "💳 Πληρωμές":
 
             status_rows.append(
                 {
+                    "Νο": p.get("jersey_number") or "—",
                     "Ονοματεπώνυμο": p.get("full_name"),
                     "Τμήμα": p.get("team") or "—",
                     "Ποσό": format_money(
                         monthly_amount_by_player.get(pid)
                     ),
                     "Τελευταία πληρωμή": (
-                        format_birth_date(last_paid_on)
+                        format_date(last_paid_on)
                         if last_paid_on
                         else "—"
                     ),
@@ -662,6 +835,7 @@ elif page == "💳 Πληρωμές":
             return [""] * len(row)
 
         visible_cols = [
+            "Νο",
             "Ονοματεπώνυμο",
             "Τμήμα",
             "Ποσό",
@@ -827,7 +1001,8 @@ elif page == "💳 Πληρωμές":
 
                 display_rows.append(
                     {
-                        "Ημερομηνία": format_birth_date(
+                        "Νο": player_by_id.get(history_pid, {}).get("jersey_number") or "—",
+                        "Ημερομηνία": format_date(
                             r.get("paid_on")
                         ),
                         "Ποσό": format_money(r.get("amount")),
@@ -847,6 +1022,115 @@ elif page == "💳 Πληρωμές":
             st.info(
                 "Δεν έχει καταχωρηθεί πρώτη πληρωμή για αυτόν τον παίκτη."
             )
+
+    with tab_edit:
+        st.subheader("Edit / Διαγραφή πληρωμής")
+
+        if not payment_rows:
+            st.info("Δεν υπάρχουν πληρωμές.")
+        else:
+            payment_options = {}
+
+            for r in payment_rows:
+                p = player_by_id.get(r.get("player_id"))
+
+                if not p:
+                    continue
+
+                label = (
+                    f'{player_short_name(p)} · '
+                    f'{format_date(r.get("paid_on"))} · '
+                    f'{format_money(r.get("amount"))}'
+                )
+
+                payment_options[f"{label} · {r['id'][:8]}"] = r
+
+            if not payment_options:
+                st.info("Δεν υπάρχουν διαθέσιμες πληρωμές για επεξεργασία.")
+            else:
+                selected_payment_label = st.selectbox(
+                    "Επίλεξε πληρωμή",
+                    list(payment_options.keys()),
+                    key="edit_payment_select",
+                )
+
+                selected_payment = payment_options[selected_payment_label]
+                selected_payment_player = player_by_id.get(
+                    selected_payment.get("player_id")
+                )
+
+                with st.form("edit_payment_form"):
+                    st.text_input(
+                        "Παίκτης",
+                        value=player_short_name(selected_payment_player),
+                        disabled=True,
+                    )
+
+                    edit_amount = st.number_input(
+                        "Ποσό (€)",
+                        min_value=0.01,
+                        value=float(selected_payment.get("amount") or 0),
+                        step=5.0,
+                    )
+
+                    edit_paid_on = st.date_input(
+                        "Ημερομηνία πληρωμής",
+                        value=pd.to_datetime(
+                            selected_payment.get("paid_on")
+                        ).date(),
+                        format="DD/MM/YYYY",
+                    )
+
+                    edit_note = st.text_area(
+                        "Σημείωση",
+                        value=selected_payment.get("note") or "",
+                    )
+
+                    save_payment_edit = st.form_submit_button(
+                        "Αποθήκευση αλλαγών",
+                        use_container_width=True,
+                    )
+
+                if save_payment_edit:
+                    (
+                        sb.table("payments")
+                        .update(
+                            {
+                                "amount": float(edit_amount),
+                                "paid_on": str(edit_paid_on),
+                                "note": edit_note.strip() or None,
+                            }
+                        )
+                        .eq("id", selected_payment["id"])
+                        .execute()
+                    )
+
+                    st.success("Η πληρωμή ενημερώθηκε.")
+                    st.rerun()
+
+                st.divider()
+                st.subheader("Οριστική διαγραφή πληρωμής")
+
+                confirm_payment_delete = st.checkbox(
+                    "Επιβεβαίωση διαγραφής",
+                    key=f"confirm_payment_delete_{selected_payment['id']}",
+                )
+
+                if st.button(
+                    "Διαγραφή πληρωμής",
+                    type="primary",
+                    disabled=not confirm_payment_delete,
+                    use_container_width=True,
+                ):
+                    (
+                        sb.table("payments")
+                        .delete()
+                        .eq("id", selected_payment["id"])
+                        .execute()
+                    )
+
+                    st.success("Η πληρωμή διαγράφηκε οριστικά.")
+                    st.rerun()
 
 
 # ============================================================
@@ -1031,4 +1315,4 @@ elif page == "⚙️ Χρήστες":
             st.rerun()
 
 
-st.caption("Ταυροι Καλαμαριας Coaches 🏀")
+st.caption(APP_NAME)
