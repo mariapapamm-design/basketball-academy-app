@@ -754,345 +754,677 @@ if page == "🏠 Dashboard":
 # ============================================================
 
 elif page == "👥 Παίκτες":
-    st.title("Παίκτες")
+    players = get_players(active_only=False)
 
-    tab_list, tab_new = st.tabs(
-        [
-            "Λίστα παικτών",
-            "➕ Νέος παίκτης",
-        ]
-    )
+    # ========================================================
+    # FULL PAGE EDIT
+    # ========================================================
+    edit_id = st.session_state.get("edit_player_id")
 
-    with tab_list:
-        players = get_players(active_only=False)
+    if edit_id:
+        selected = next(
+            (p for p in players if p["id"] == edit_id),
+            None,
+        )
 
-        if not players:
-            st.info("Δεν υπάρχουν παίκτες.")
-        else:
-            # Header
-            header = st.columns([0.6, 0.7, 2.4, 1.6, 1.8, 1.2, 0.8, 1.2])
-            header[0].markdown("**Φωτο**")
-            header[1].markdown("**Νο**")
-            header[2].markdown("**Ονοματεπώνυμο**")
-            header[3].markdown("**Ημ. Γέννησης**")
-            header[4].markdown("**Τμήμα**")
-            header[5].markdown("**Μέγεθος**")
-            header[6].markdown("**Active**")
-            header[7].markdown("**Ενέργειες**")
+        if not selected:
+            st.session_state.pop("edit_player_id", None)
+            set_flash("Ο παίκτης δεν βρέθηκε.", "error")
+            st.rerun()
 
-            st.divider()
+        if st.button(
+            "← Επιστροφή στη λίστα παικτών",
+            use_container_width=False,
+        ):
+            st.session_state.pop("edit_player_id", None)
+            st.rerun()
 
-            for p in players:
-                cols = st.columns([0.6, 0.7, 2.4, 1.6, 1.8, 1.2, 0.8, 1.2])
+        st.title("✏️ Edit παίκτη")
+        st.subheader(selected.get("full_name") or "")
 
-                with cols[0]:
-                    show_player_photo(p, width=48)
+        top = st.columns([1, 4])
 
-                cols[1].write(p.get("jersey_number") or "—")
-                cols[2].write(p.get("full_name") or "—")
-                cols[3].write(format_date(p.get("birth_date")))
-                cols[4].write(p.get("team") or "—")
-                cols[5].write(p.get("jersey_size") or "—")
-                cols[6].write("✅" if p.get("active", True) else "—")
+        with top[0]:
+            existing_photo = signed_photo_url(
+                selected.get("photo_path")
+            )
+            if existing_photo:
+                st.image(existing_photo, width=150)
+            else:
+                st.markdown("### 👤")
 
-                with cols[7]:
-                    c_edit, c_delete = st.columns(2)
+        with top[1]:
+            st.write(
+                f"**Τμήμα:** {selected.get('team') or '—'}"
+            )
+            st.write(
+                f"**Νο φανέλας:** "
+                f"{selected.get('jersey_number') or '—'}"
+            )
 
-                    if c_edit.button(
-                        "✏️",
-                        key=f"player_edit_btn_{p['id']}",
-                        help="Edit",
-                        use_container_width=True,
-                    ):
-                        st.session_state["edit_player_id"] = p["id"]
-                        st.session_state.pop("delete_player_id", None)
+        current_birth = (
+            pd.to_datetime(
+                selected.get("birth_date")
+            ).date()
+            if selected.get("birth_date")
+            else date(2012, 1, 1)
+        )
 
-                    if c_delete.button(
-                        "🗑️",
-                        key=f"player_delete_btn_{p['id']}",
-                        help="Διαγραφή",
-                        use_container_width=True,
-                    ):
-                        st.session_state["delete_player_id"] = p["id"]
-                        st.session_state.pop("edit_player_id", None)
+        current_team = selected.get("team")
+        team_index = (
+            TEAMS.index(current_team)
+            if current_team in TEAMS
+            else 0
+        )
 
-                st.divider()
+        current_size = selected.get("jersey_size")
+        size_index = (
+            JERSEY_SIZES.index(current_size)
+            if current_size in JERSEY_SIZES
+            else 0
+        )
 
-            # Inline edit panel
-            edit_id = st.session_state.get("edit_player_id")
-            if edit_id:
-                selected = next((p for p in players if p["id"] == edit_id), None)
+        current_fee = float(
+            selected.get("monthly_fee") or 0
+        )
 
-                if selected:
-                    st.subheader(f"✏️ Edit — {selected.get('full_name')}")
+        with st.form(
+            f"edit_player_form_{selected['id']}"
+        ):
+            edit_name = st.text_input(
+                "Ονοματεπώνυμο",
+                value=selected.get("full_name") or "",
+            )
 
-                    current_birth = (
-                        pd.to_datetime(selected.get("birth_date")).date()
-                        if selected.get("birth_date")
-                        else date(2012, 1, 1)
-                    )
-
-                    current_team = selected.get("team")
-                    team_index = TEAMS.index(current_team) if current_team in TEAMS else 0
-
-                    current_size = selected.get("jersey_size")
-                    size_index = (
-                        JERSEY_SIZES.index(current_size)
-                        if current_size in JERSEY_SIZES
-                        else 0
-                    )
-
-                    current_fee = float(selected.get("monthly_fee") or 0)
-
-                    existing_photo = signed_photo_url(selected.get("photo_path"))
-                    if existing_photo:
-                        st.image(existing_photo, width=120)
-
-                    with st.form(f"edit_player_form_{selected['id']}"):
-                        edit_name = st.text_input(
-                            "Ονοματεπώνυμο",
-                            value=selected.get("full_name") or "",
-                        )
-
-                        edit_birth = st.date_input(
-                            "Ημερομηνία Γέννησης",
-                            value=current_birth,
-                            min_value=date(1990, 1, 1),
-                            max_value=date.today(),
-                            format="DD/MM/YYYY",
-                        )
-
-                        edit_team = st.selectbox(
-                            "Τμήμα",
-                            TEAMS,
-                            index=team_index,
-                        )
-
-                        edit_number = st.text_input(
-                            "Νούμερο φανέλας",
-                            value=selected.get("jersey_number") or "",
-                        )
-
-                        edit_size = st.selectbox(
-                            "Μέγεθος φανέλας",
-                            JERSEY_SIZES,
-                            index=size_index,
-                        )
-
-                        edit_fee = st.number_input(
-                            "Μηνιαίο ποσό (€)",
-                            min_value=0.0,
-                            value=current_fee,
-                            step=5.0,
-                        )
-
-                        edit_photo = st.file_uploader(
-                            "Νέα φωτογραφία (προαιρετικό)",
-                            type=["jpg", "jpeg", "png", "webp"],
-                            max_upload_size=5,
-                            key=f"edit_photo_{selected['id']}",
-                        )
-
-                        remove_photo = st.checkbox(
-                            "Αφαίρεση υπάρχουσας φωτογραφίας",
-                            value=False,
-                        )
-
-                        edit_notes = st.text_area(
-                            "Σημειώσεις",
-                            value=selected.get("notes") or "",
-                        )
-
-                        edit_active = st.checkbox(
-                            "Active",
-                            value=bool(selected.get("active", True)),
-                        )
-
-                        save_edit = st.form_submit_button(
-                            "Αποθήκευση αλλαγών",
-                            use_container_width=True,
-                        )
-
-                    if save_edit:
-                        if not edit_name.strip():
-                            st.error("Το ονοματεπώνυμο είναι υποχρεωτικό.")
-                        elif duplicate_player_exists(
-                            edit_name,
-                            edit_birth,
-                            exclude_id=selected["id"],
-                        ):
-                            st.error(
-                                "Υπάρχει ήδη παίκτης με το ίδιο όνομα και ημερομηνία γέννησης."
-                            )
-                        else:
-                            photo_path = selected.get("photo_path")
-
-                            try:
-                                if remove_photo and photo_path:
-                                    remove_player_photo(photo_path)
-                                    photo_path = None
-
-                                if edit_photo is not None:
-                                    if photo_path:
-                                        remove_player_photo(photo_path)
-                                    photo_path = upload_player_photo(
-                                        selected["id"],
-                                        edit_photo,
-                                    )
-                            except Exception:
-                                st.warning(
-                                    "Οι πληροφορίες θα αποθηκευτούν, αλλά υπήρξε πρόβλημα με τη φωτογραφία."
-                                )
-
-                            (
-                                sb.table("players")
-                                .update(
-                                    {
-                                        "full_name": edit_name.strip(),
-                                        "birth_date": str(edit_birth),
-                                        "team": edit_team,
-                                        "jersey_number": edit_number.strip() or None,
-                                        "jersey_size": edit_size,
-                                        "monthly_fee": float(edit_fee),
-                                        "photo_path": photo_path,
-                                        "notes": edit_notes.strip() or None,
-                                        "active": bool(edit_active),
-                                    }
-                                )
-                                .eq("id", selected["id"])
-                                .execute()
-                            )
-
-                            st.session_state.pop("edit_player_id", None)
-                            set_flash("✅ Οι αλλαγές του παίκτη αποθηκεύτηκαν.")
-                            st.rerun()
-
-            # Inline delete panel
-            delete_id = st.session_state.get("delete_player_id")
-            if delete_id:
-                selected = next((p for p in players if p["id"] == delete_id), None)
-
-                if selected:
-                    st.subheader(f"🗑️ Διαγραφή — {selected.get('full_name')}")
-                    st.warning(
-                        "Η οριστική διαγραφή διαγράφει μαζί τις παρουσίες "
-                        "και τις πληρωμές που συνδέονται με τον παίκτη."
-                    )
-
-                    confirm_delete = st.checkbox(
-                        "Επιβεβαίωση διαγραφής",
-                        key=f"confirm_player_delete_{selected['id']}",
-                    )
-
-                    if st.button(
-                        "Οριστική διαγραφή",
-                        type="primary",
-                        disabled=not confirm_delete,
-                        key=f"delete_player_final_{selected['id']}",
-                    ):
-                        remove_player_photo(selected.get("photo_path"))
-
-                        (
-                            sb.table("players")
-                            .delete()
-                            .eq("id", selected["id"])
-                            .execute()
-                        )
-
-                        st.session_state.pop("delete_player_id", None)
-                        set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
-                        st.rerun()
-
-    with tab_new:
-        with st.form("new_player"):
-            full_name = st.text_input("Ονοματεπώνυμο *")
-
-            birth_date = st.date_input(
+            edit_birth = st.date_input(
                 "Ημερομηνία Γέννησης",
-                value=date(2012, 1, 1),
+                value=current_birth,
                 min_value=date(1990, 1, 1),
                 max_value=date.today(),
                 format="DD/MM/YYYY",
             )
 
-            team = st.selectbox("Τμήμα", TEAMS)
-
-            jersey_number = st.text_input(
-                "Νούμερο φανέλας",
-                placeholder="π.χ. 7, 23, 00",
+            edit_team = st.selectbox(
+                "Τμήμα",
+                TEAMS,
+                index=team_index,
             )
 
-            jersey_size = st.selectbox(
+            edit_number = st.text_input(
+                "Νούμερο φανέλας",
+                value=selected.get(
+                    "jersey_number"
+                ) or "",
+            )
+
+            edit_size = st.selectbox(
                 "Μέγεθος φανέλας",
                 JERSEY_SIZES,
+                index=size_index,
             )
 
-            monthly_fee = st.number_input(
+            edit_fee = st.number_input(
                 "Μηνιαίο ποσό (€)",
                 min_value=0.0,
-                value=0.0,
+                value=current_fee,
                 step=5.0,
             )
 
-            photo = st.file_uploader(
-                "Φωτογραφία παίκτη",
-                type=["jpg", "jpeg", "png", "webp"],
+            edit_photo = st.file_uploader(
+                "Νέα φωτογραφία (προαιρετικό)",
+                type=[
+                    "jpg",
+                    "jpeg",
+                    "png",
+                    "webp",
+                ],
                 max_upload_size=5,
+                key=f"edit_photo_{selected['id']}",
             )
 
-            notes = st.text_area("Σημειώσεις")
+            remove_photo = st.checkbox(
+                "Αφαίρεση υπάρχουσας φωτογραφίας",
+                value=False,
+            )
 
-            save = st.form_submit_button(
-                "Αποθήκευση παίκτη",
+            edit_notes = st.text_area(
+                "Σημειώσεις",
+                value=selected.get("notes") or "",
+            )
+
+            edit_active = st.checkbox(
+                "Active",
+                value=bool(
+                    selected.get("active", True)
+                ),
+            )
+
+            save_edit = st.form_submit_button(
+                "💾 Αποθήκευση αλλαγών",
                 use_container_width=True,
             )
 
-        if save:
-            if not full_name.strip():
-                st.error("Το ονοματεπώνυμο είναι υποχρεωτικό.")
-            elif duplicate_player_exists(full_name, birth_date):
+        if save_edit:
+            if not edit_name.strip():
                 st.error(
-                    "Υπάρχει ήδη παίκτης με το ίδιο όνομα και ημερομηνία γέννησης."
+                    "Το ονοματεπώνυμο είναι υποχρεωτικό."
                 )
+
+            elif duplicate_player_exists(
+                edit_name,
+                edit_birth,
+                exclude_id=selected["id"],
+            ):
+                st.error(
+                    "Υπάρχει ήδη παίκτης με το ίδιο "
+                    "όνομα και ημερομηνία γέννησης."
+                )
+
             else:
-                response = (
+                photo_path = selected.get(
+                    "photo_path"
+                )
+
+                try:
+                    if remove_photo and photo_path:
+                        remove_player_photo(
+                            photo_path
+                        )
+                        photo_path = None
+
+                    if edit_photo is not None:
+                        if photo_path:
+                            remove_player_photo(
+                                photo_path
+                            )
+
+                        photo_path = (
+                            upload_player_photo(
+                                selected["id"],
+                                edit_photo,
+                            )
+                        )
+
+                except Exception:
+                    st.warning(
+                        "Οι πληροφορίες θα αποθηκευτούν, "
+                        "αλλά υπήρξε πρόβλημα "
+                        "με τη φωτογραφία."
+                    )
+
+                (
                     sb.table("players")
-                    .insert(
+                    .update(
                         {
-                            "full_name": full_name.strip(),
-                            "birth_date": str(birth_date),
-                            "team": team,
-                            "jersey_number": jersey_number.strip() or None,
-                            "jersey_size": jersey_size,
-                            "monthly_fee": float(monthly_fee),
-                            "notes": notes.strip() or None,
-                            "active": True,
-                            "created_by": st.session_state.user.id,
+                            "full_name": (
+                                edit_name.strip()
+                            ),
+                            "birth_date": str(
+                                edit_birth
+                            ),
+                            "team": edit_team,
+                            "jersey_number": (
+                                edit_number.strip()
+                                or None
+                            ),
+                            "jersey_size": edit_size,
+                            "monthly_fee": float(
+                                edit_fee
+                            ),
+                            "photo_path": photo_path,
+                            "notes": (
+                                edit_notes.strip()
+                                or None
+                            ),
+                            "active": bool(
+                                edit_active
+                            ),
                         }
+                    )
+                    .eq(
+                        "id",
+                        selected["id"],
                     )
                     .execute()
                 )
 
-                new_player = response.data[0] if response.data else None
-
-                if new_player and photo is not None:
-                    try:
-                        path = upload_player_photo(new_player["id"], photo)
-                        (
-                            sb.table("players")
-                            .update({"photo_path": path})
-                            .eq("id", new_player["id"])
-                            .execute()
-                        )
-                    except Exception:
-                        set_flash(
-                            "✅ Ο παίκτης αποθηκεύτηκε, αλλά η φωτογραφία δεν ανέβηκε.",
-                            "warning",
-                        )
-                        st.rerun()
-
-                set_flash("✅ Ο παίκτης αποθηκεύτηκε.")
+                st.session_state.pop(
+                    "edit_player_id",
+                    None,
+                )
+                set_flash(
+                    "✅ Οι αλλαγές του παίκτη "
+                    "αποθηκεύτηκαν."
+                )
                 st.rerun()
+
+    # ========================================================
+    # NORMAL PLAYERS PAGE
+    # ========================================================
+    else:
+        st.title("Παίκτες")
+
+        tab_list, tab_new = st.tabs(
+            [
+                "Λίστα παικτών",
+                "➕ Νέος παίκτης",
+            ]
+        )
+
+        with tab_list:
+            if not players:
+                st.info("Δεν υπάρχουν παίκτες.")
+
+            else:
+                header = st.columns(
+                    [
+                        0.6,
+                        0.7,
+                        2.4,
+                        1.6,
+                        1.8,
+                        1.2,
+                        0.8,
+                        1.2,
+                    ]
+                )
+
+                header[0].markdown("**Φωτο**")
+                header[1].markdown("**Νο**")
+                header[2].markdown(
+                    "**Ονοματεπώνυμο**"
+                )
+                header[3].markdown(
+                    "**Ημ. Γέννησης**"
+                )
+                header[4].markdown("**Τμήμα**")
+                header[5].markdown("**Μέγεθος**")
+                header[6].markdown("**Active**")
+                header[7].markdown(
+                    "**Ενέργειες**"
+                )
+
+                st.divider()
+
+                for p in players:
+                    cols = st.columns(
+                        [
+                            0.6,
+                            0.7,
+                            2.4,
+                            1.6,
+                            1.8,
+                            1.2,
+                            0.8,
+                            1.2,
+                        ]
+                    )
+
+                    with cols[0]:
+                        show_player_photo(
+                            p,
+                            width=48,
+                        )
+
+                    cols[1].write(
+                        p.get(
+                            "jersey_number"
+                        ) or "—"
+                    )
+                    cols[2].write(
+                        p.get("full_name")
+                        or "—"
+                    )
+                    cols[3].write(
+                        format_date(
+                            p.get(
+                                "birth_date"
+                            )
+                        )
+                    )
+                    cols[4].write(
+                        p.get("team") or "—"
+                    )
+                    cols[5].write(
+                        p.get(
+                            "jersey_size"
+                        ) or "—"
+                    )
+                    cols[6].write(
+                        "✅"
+                        if p.get(
+                            "active",
+                            True,
+                        )
+                        else "—"
+                    )
+
+                    with cols[7]:
+                        c_edit, c_delete = (
+                            st.columns(2)
+                        )
+
+                        if c_edit.button(
+                            "✏️",
+                            key=(
+                                "player_edit_btn_"
+                                f"{p['id']}"
+                            ),
+                            help="Edit",
+                            use_container_width=True,
+                        ):
+                            st.session_state[
+                                "edit_player_id"
+                            ] = p["id"]
+
+                            st.session_state.pop(
+                                "delete_player_id",
+                                None,
+                            )
+                            st.rerun()
+
+                        if c_delete.button(
+                            "🗑️",
+                            key=(
+                                "player_delete_btn_"
+                                f"{p['id']}"
+                            ),
+                            help="Διαγραφή",
+                            use_container_width=True,
+                        ):
+                            st.session_state[
+                                "delete_player_id"
+                            ] = p["id"]
+
+                            st.session_state.pop(
+                                "edit_player_id",
+                                None,
+                            )
+                            st.rerun()
+
+                    st.divider()
+
+                delete_id = (
+                    st.session_state.get(
+                        "delete_player_id"
+                    )
+                )
+
+                if delete_id:
+                    selected = next(
+                        (
+                            p
+                            for p in players
+                            if p["id"]
+                            == delete_id
+                        ),
+                        None,
+                    )
+
+                    if selected:
+                        st.subheader(
+                            "🗑️ Διαγραφή — "
+                            f"{selected.get('full_name')}"
+                        )
+
+                        st.warning(
+                            "Η οριστική διαγραφή "
+                            "διαγράφει μαζί τις "
+                            "παρουσίες και τις πληρωμές "
+                            "που συνδέονται με τον παίκτη."
+                        )
+
+                        confirm_delete = (
+                            st.checkbox(
+                                "Επιβεβαίωση διαγραφής",
+                                key=(
+                                    "confirm_player_"
+                                    "delete_"
+                                    f"{selected['id']}"
+                                ),
+                            )
+                        )
+
+                        d1, d2 = st.columns(2)
+
+                        if d1.button(
+                            "Οριστική διαγραφή",
+                            type="primary",
+                            disabled=(
+                                not confirm_delete
+                            ),
+                            key=(
+                                "delete_player_"
+                                "final_"
+                                f"{selected['id']}"
+                            ),
+                            use_container_width=True,
+                        ):
+                            remove_player_photo(
+                                selected.get(
+                                    "photo_path"
+                                )
+                            )
+
+                            (
+                                sb.table(
+                                    "players"
+                                )
+                                .delete()
+                                .eq(
+                                    "id",
+                                    selected["id"],
+                                )
+                                .execute()
+                            )
+
+                            st.session_state.pop(
+                                "delete_player_id",
+                                None,
+                            )
+                            set_flash(
+                                "✅ Η διαγραφή "
+                                "ολοκληρώθηκε."
+                            )
+                            st.rerun()
+
+                        if d2.button(
+                            "Ακύρωση",
+                            key=(
+                                "cancel_player_"
+                                "delete_"
+                                f"{selected['id']}"
+                            ),
+                            use_container_width=True,
+                        ):
+                            st.session_state.pop(
+                                "delete_player_id",
+                                None,
+                            )
+                            st.rerun()
+
+        with tab_new:
+            with st.form("new_player"):
+                full_name = st.text_input(
+                    "Ονοματεπώνυμο *"
+                )
+
+                birth_date = st.date_input(
+                    "Ημερομηνία Γέννησης",
+                    value=date(
+                        2012,
+                        1,
+                        1,
+                    ),
+                    min_value=date(
+                        1990,
+                        1,
+                        1,
+                    ),
+                    max_value=date.today(),
+                    format="DD/MM/YYYY",
+                )
+
+                team = st.selectbox(
+                    "Τμήμα",
+                    TEAMS,
+                )
+
+                jersey_number = (
+                    st.text_input(
+                        "Νούμερο φανέλας",
+                        placeholder=(
+                            "π.χ. 7, 23, 00"
+                        ),
+                    )
+                )
+
+                jersey_size = (
+                    st.selectbox(
+                        "Μέγεθος φανέλας",
+                        JERSEY_SIZES,
+                    )
+                )
+
+                monthly_fee = (
+                    st.number_input(
+                        "Μηνιαίο ποσό (€)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=5.0,
+                    )
+                )
+
+                photo = st.file_uploader(
+                    "Φωτογραφία παίκτη",
+                    type=[
+                        "jpg",
+                        "jpeg",
+                        "png",
+                        "webp",
+                    ],
+                    max_upload_size=5,
+                )
+
+                notes = st.text_area(
+                    "Σημειώσεις"
+                )
+
+                save = (
+                    st.form_submit_button(
+                        "Αποθήκευση παίκτη",
+                        use_container_width=True,
+                    )
+                )
+
+            if save:
+                if not full_name.strip():
+                    st.error(
+                        "Το ονοματεπώνυμο "
+                        "είναι υποχρεωτικό."
+                    )
+
+                elif duplicate_player_exists(
+                    full_name,
+                    birth_date,
+                ):
+                    st.error(
+                        "Υπάρχει ήδη παίκτης "
+                        "με το ίδιο όνομα και "
+                        "ημερομηνία γέννησης."
+                    )
+
+                else:
+                    response = (
+                        sb.table("players")
+                        .insert(
+                            {
+                                "full_name": (
+                                    full_name.strip()
+                                ),
+                                "birth_date": str(
+                                    birth_date
+                                ),
+                                "team": team,
+                                "jersey_number": (
+                                    jersey_number.strip()
+                                    or None
+                                ),
+                                "jersey_size": (
+                                    jersey_size
+                                ),
+                                "monthly_fee": float(
+                                    monthly_fee
+                                ),
+                                "notes": (
+                                    notes.strip()
+                                    or None
+                                ),
+                                "active": True,
+                                "created_by": (
+                                    st.session_state
+                                    .user.id
+                                ),
+                            }
+                        )
+                        .execute()
+                    )
+
+                    new_player = (
+                        response.data[0]
+                        if response.data
+                        else None
+                    )
+
+                    if (
+                        new_player
+                        and photo is not None
+                    ):
+                        try:
+                            path = (
+                                upload_player_photo(
+                                    new_player[
+                                        "id"
+                                    ],
+                                    photo,
+                                )
+                            )
+
+                            (
+                                sb.table(
+                                    "players"
+                                )
+                                .update(
+                                    {
+                                        "photo_path": (
+                                            path
+                                        )
+                                    }
+                                )
+                                .eq(
+                                    "id",
+                                    new_player[
+                                        "id"
+                                    ],
+                                )
+                                .execute()
+                            )
+
+                        except Exception:
+                            set_flash(
+                                "✅ Ο παίκτης "
+                                "αποθηκεύτηκε, "
+                                "αλλά η φωτογραφία "
+                                "δεν ανέβηκε.",
+                                "warning",
+                            )
+                            st.rerun()
+
+                    set_flash(
+                        "✅ Ο παίκτης "
+                        "αποθηκεύτηκε."
+                    )
+                    st.rerun()
 
 
 # ============================================================
@@ -1709,7 +2041,8 @@ elif page == "💳 Πληρωμές":
         )
 
         team_players = [
-            p for p in players
+            p
+            for p in players
             if p.get("team") == payment_team
         ]
 
@@ -1720,27 +2053,44 @@ elif page == "💳 Πληρωμές":
         )
 
         if payment_player:
-            info = st.columns([0.8, 3.2, 2])
+            info = st.columns(
+                [0.8, 3.2, 2]
+            )
 
             with info[0]:
-                show_player_photo(payment_player, width=70)
+                show_player_photo(
+                    payment_player,
+                    width=70,
+                )
 
             info[1].markdown(
                 f"### {player_short_name(payment_player)}\n"
                 f"**Τμήμα:** {payment_player.get('team')}"
             )
+
             info[2].metric(
                 "Μηνιαίο ποσό",
-                format_money(payment_player.get("monthly_fee")),
+                format_money(
+                    payment_player.get(
+                        "monthly_fee"
+                    )
+                ),
             )
 
-            fee = float(payment_player.get("monthly_fee") or 0)
+            fee = float(
+                payment_player.get(
+                    "monthly_fee"
+                ) or 0
+            )
 
             if fee <= 0:
                 st.warning(
-                    "Δεν έχει οριστεί μηνιαίο ποσό για αυτόν τον παίκτη. "
-                    "Πήγαινε Παίκτες → ✏️ Edit και συμπλήρωσέ το."
+                    "Δεν έχει οριστεί μηνιαίο "
+                    "ποσό για αυτόν τον παίκτη. "
+                    "Πήγαινε Παίκτες → ✏️ Edit "
+                    "και συμπλήρωσέ το."
                 )
+
             else:
                 paid_on = st.date_input(
                     "Ημερομηνία πληρωμής",
@@ -1749,72 +2099,68 @@ elif page == "💳 Πληρωμές":
                     key="new_payment_date",
                 )
 
-                # Reset δυναμικών μηνών όταν αλλάζει παίκτης.
-                if st.session_state.get("_payment_month_player") != payment_player["id"]:
-                    st.session_state["_payment_month_player"] = payment_player["id"]
-                    st.session_state["_payment_month_count"] = 1
-
-                    # Καθαρίζουμε παλιές επιλογές.
-                    for key in list(st.session_state.keys()):
-                        if key.startswith("pay_month_choice_"):
-                            st.session_state.pop(key, None)
-
-                next_month = next_suggested_month(
-                    payment_player["id"],
-                    payment_rows,
+                next_month = (
+                    next_suggested_month(
+                        payment_player["id"],
+                        payment_rows,
+                    )
                 )
 
-                c_add, c_remove = st.columns(2)
+                opts = month_options(
+                    next_month,
+                    months_back=36,
+                    months_forward=60,
+                )
 
-                if c_add.button(
-                    "➕ Προσθήκη επιπλέον μήνα",
-                    use_container_width=True,
-                    key="add_payment_month",
-                ):
-                    st.session_state["_payment_month_count"] += 1
-                    st.rerun()
-
-                if c_remove.button(
-                    "➖ Αφαίρεση τελευταίου μήνα",
-                    use_container_width=True,
-                    disabled=st.session_state["_payment_month_count"] <= 1,
-                    key="remove_payment_month",
-                ):
-                    st.session_state["_payment_month_count"] = max(
-                        1,
-                        st.session_state["_payment_month_count"] - 1,
-                    )
-                    st.rerun()
-
-                month_count = st.session_state["_payment_month_count"]
-                opts = month_options(next_month)
-
-                selected_months = []
-
-                for i in range(month_count):
-                    default_month = next_month + relativedelta(months=i)
-                    default_index = (
-                        opts.index(default_month)
-                        if default_month in opts
-                        else 24
-                    )
-
-                    chosen = st.selectbox(
-                        f"Μήνας {i + 1}",
-                        opts,
-                        index=default_index,
+                selected_months = (
+                    st.multiselect(
+                        "Μήνες που καλύπτει η πληρωμή",
+                        options=opts,
+                        default=[next_month],
                         format_func=month_label,
-                        filter_mode="contains",
-                        key=f"pay_month_choice_{payment_player['id']}_{i}",
+                        key=(
+                            "payment_months_multi_"
+                            f"{payment_player['id']}"
+                        ),
+                        help=(
+                            "Μπορείς να επιλέξεις "
+                            "όσους μήνες θέλεις και "
+                            "δεν χρειάζεται να είναι "
+                            "συνεχόμενοι. Π.χ. "
+                            "Οκτώβριος και Δεκέμβριος."
+                        ),
                     )
-                    selected_months.append(chosen)
+                )
 
-                total_amount = fee * len(selected_months)
+                st.caption(
+                    "Οι μήνες είναι ανεξάρτητοι "
+                    "μεταξύ τους. Αν δεν επιλεγεί "
+                    "ένας ενδιάμεσος μήνας, "
+                    "δεν θεωρείται αυτόματα οφειλή."
+                )
+
+                total_amount = (
+                    fee
+                    * len(selected_months)
+                )
 
                 st.metric(
                     "Συνολικό ποσό",
-                    format_money(total_amount),
+                    format_money(
+                        total_amount
+                    ),
                 )
+
+                if selected_months:
+                    st.write(
+                        "**Θα καταχωρηθούν:** "
+                        + ", ".join(
+                            month_label(m)
+                            for m in sorted(
+                                selected_months
+                            )
+                        )
+                    )
 
                 note = st.text_area(
                     "Σημείωση",
@@ -1828,52 +2174,111 @@ elif page == "💳 Πληρωμές":
                     use_container_width=True,
                     key="save_multi_payment",
                 ):
-                    if len(set(selected_months)) != len(selected_months):
-                        st.error("Έχεις επιλέξει τον ίδιο μήνα περισσότερες από μία φορές.")
+                    if not selected_months:
+                        st.error(
+                            "Επίλεξε τουλάχιστον "
+                            "έναν μήνα."
+                        )
+
                     else:
                         duplicates = []
 
                         for m in selected_months:
                             existing = (
-                                sb.table("payments")
+                                sb.table(
+                                    "payments"
+                                )
                                 .select("id")
-                                .eq("player_id", payment_player["id"])
-                                .eq("coverage_month", str(m))
+                                .eq(
+                                    "player_id",
+                                    payment_player[
+                                        "id"
+                                    ],
+                                )
+                                .eq(
+                                    "coverage_month",
+                                    str(m),
+                                )
                                 .execute()
                                 .data
                             )
 
                             if existing:
-                                duplicates.append(month_label(m))
+                                duplicates.append(
+                                    month_label(m)
+                                )
 
                         if duplicates:
                             st.error(
-                                "Υπάρχει ήδη πληρωμή για: "
-                                + ", ".join(duplicates)
+                                "Υπάρχει ήδη πληρωμή "
+                                "για: "
+                                + ", ".join(
+                                    duplicates
+                                )
                             )
+
                         else:
-                            batch_id = str(uuid.uuid4())
+                            batch_id = str(
+                                uuid.uuid4()
+                            )
 
                             payload = [
                                 {
-                                    "player_id": payment_player["id"],
+                                    "player_id": (
+                                        payment_player[
+                                            "id"
+                                        ]
+                                    ),
                                     "amount": fee,
-                                    "paid_on": str(paid_on),
-                                    "coverage_month": str(m),
-                                    "payment_batch_id": batch_id,
-                                    "note": note.strip() or None,
-                                    "recorded_by": st.session_state.user.id,
+                                    "paid_on": str(
+                                        paid_on
+                                    ),
+                                    "coverage_month": str(
+                                        m
+                                    ),
+                                    "payment_batch_id": (
+                                        batch_id
+                                    ),
+                                    "note": (
+                                        note.strip()
+                                        or None
+                                    ),
+                                    "recorded_by": (
+                                        st.session_state
+                                        .user.id
+                                    ),
                                 }
-                                for m in selected_months
+                                for m
+                                in selected_months
                             ]
 
-                            sb.table("payments").insert(payload).execute()
+                            (
+                                sb.table(
+                                    "payments"
+                                )
+                                .insert(payload)
+                                .execute()
+                            )
 
-                            st.session_state["_payment_month_count"] = 1
+                            st.session_state.pop(
+                                (
+                                    "payment_months_multi_"
+                                    f"{payment_player['id']}"
+                                ),
+                                None,
+                            )
+
                             set_flash(
-                                "✅ Η πληρωμή καταχωρήθηκε: "
-                                f"{format_money(total_amount)} για "
-                                + ", ".join(month_label(m) for m in selected_months)
+                                "✅ Η πληρωμή "
+                                "καταχωρήθηκε: "
+                                f"{format_money(total_amount)} "
+                                "για "
+                                + ", ".join(
+                                    month_label(m)
+                                    for m in sorted(
+                                        selected_months
+                                    )
+                                )
                                 + "."
                             )
                             st.rerun()
