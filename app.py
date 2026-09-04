@@ -2041,8 +2041,7 @@ elif page == "💳 Πληρωμές":
         )
 
         team_players = [
-            p
-            for p in players
+            p for p in players
             if p.get("team") == payment_team
         ]
 
@@ -2053,15 +2052,10 @@ elif page == "💳 Πληρωμές":
         )
 
         if payment_player:
-            info = st.columns(
-                [0.8, 3.2, 2]
-            )
+            info = st.columns([0.8, 3.2, 2])
 
             with info[0]:
-                show_player_photo(
-                    payment_player,
-                    width=70,
-                )
+                show_player_photo(payment_player, width=70)
 
             info[1].markdown(
                 f"### {player_short_name(payment_player)}\n"
@@ -2070,27 +2064,16 @@ elif page == "💳 Πληρωμές":
 
             info[2].metric(
                 "Μηνιαίο ποσό",
-                format_money(
-                    payment_player.get(
-                        "monthly_fee"
-                    )
-                ),
+                format_money(payment_player.get("monthly_fee")),
             )
 
-            fee = float(
-                payment_player.get(
-                    "monthly_fee"
-                ) or 0
-            )
+            fee = float(payment_player.get("monthly_fee") or 0)
 
             if fee <= 0:
                 st.warning(
-                    "Δεν έχει οριστεί μηνιαίο "
-                    "ποσό για αυτόν τον παίκτη. "
-                    "Πήγαινε Παίκτες → ✏️ Edit "
-                    "και συμπλήρωσέ το."
+                    "Δεν έχει οριστεί μηνιαίο ποσό για αυτόν τον παίκτη. "
+                    "Πήγαινε Παίκτες → ✏️ Edit και συμπλήρωσέ το."
                 )
-
             else:
                 paid_on = st.date_input(
                     "Ημερομηνία πληρωμής",
@@ -2099,68 +2082,134 @@ elif page == "💳 Πληρωμές":
                     key="new_payment_date",
                 )
 
-                next_month = (
-                    next_suggested_month(
-                        payment_player["id"],
-                        payment_rows,
-                    )
+                next_month = next_suggested_month(
+                    payment_player["id"],
+                    payment_rows,
                 )
 
-                opts = month_options(
-                    next_month,
-                    months_back=36,
-                    months_forward=60,
+                current_year = date.today().year
+                year_options = list(range(current_year - 5, current_year + 6))
+                if next_month.year not in year_options:
+                    year_options.append(next_month.year)
+                    year_options = sorted(set(year_options))
+
+                primary_year = st.selectbox(
+                    "Έτος",
+                    year_options,
+                    index=year_options.index(next_month.year),
+                    key=f"payment_primary_year_{payment_player['id']}",
                 )
 
-                selected_months = (
-                    st.multiselect(
-                        "Μήνες που καλύπτει η πληρωμή",
-                        options=opts,
-                        default=[next_month],
-                        format_func=month_label,
+                short_months = {
+                    1: "Ιαν", 2: "Φεβ", 3: "Μαρ", 4: "Απρ",
+                    5: "Μάι", 6: "Ιουν", 7: "Ιουλ", 8: "Αυγ",
+                    9: "Σεπ", 10: "Οκτ", 11: "Νοε", 12: "Δεκ",
+                }
+
+                st.markdown("**Επίλεξε τους μήνες που καλύπτει:**")
+                selected_months = []
+
+                for start_month in (1, 5, 9):
+                    cols = st.columns(4)
+                    for offset in range(4):
+                        month_num = start_month + offset
+                        month_date = date(primary_year, month_num, 1)
+                        checked = cols[offset].checkbox(
+                            short_months[month_num],
+                            value=(
+                                primary_year == next_month.year
+                                and month_num == next_month.month
+                            ),
+                            key=(
+                                f"pay_month_{payment_player['id']}_"
+                                f"{primary_year}_{month_num}"
+                            ),
+                        )
+                        if checked:
+                            selected_months.append(month_date)
+
+                second_year_key = (
+                    f"payment_second_year_enabled_{payment_player['id']}"
+                )
+                second_year = None
+
+                if not st.session_state.get(second_year_key, False):
+                    if st.button(
+                        "➕ Προσθήκη άλλου έτους",
+                        key=f"add_second_payment_year_{payment_player['id']}",
+                    ):
+                        st.session_state[second_year_key] = True
+                        st.rerun()
+
+                if st.session_state.get(second_year_key, False):
+                    second_year_options = [
+                        y for y in year_options
+                        if y != primary_year
+                    ]
+                    preferred_second_year = primary_year + 1
+                    if preferred_second_year not in second_year_options:
+                        second_year_options.append(preferred_second_year)
+                        second_year_options = sorted(set(second_year_options))
+
+                    second_year = st.selectbox(
+                        "Δεύτερο έτος",
+                        second_year_options,
+                        index=second_year_options.index(preferred_second_year),
                         key=(
-                            "payment_months_multi_"
-                            f"{payment_player['id']}"
-                        ),
-                        help=(
-                            "Μπορείς να επιλέξεις "
-                            "όσους μήνες θέλεις και "
-                            "δεν χρειάζεται να είναι "
-                            "συνεχόμενοι. Π.χ. "
-                            "Οκτώβριος και Δεκέμβριος."
+                            f"payment_second_year_{payment_player['id']}_"
+                            f"{primary_year}"
                         ),
                     )
-                )
+
+                    for start_month in (1, 5, 9):
+                        cols = st.columns(4)
+                        for offset in range(4):
+                            month_num = start_month + offset
+                            month_date = date(second_year, month_num, 1)
+                            checked = cols[offset].checkbox(
+                                short_months[month_num],
+                                value=False,
+                                key=(
+                                    f"pay_month_{payment_player['id']}_"
+                                    f"{second_year}_{month_num}"
+                                ),
+                            )
+                            if checked:
+                                selected_months.append(month_date)
+
+                    if st.button(
+                        "➖ Αφαίρεση δεύτερου έτους",
+                        key=f"remove_second_payment_year_{payment_player['id']}",
+                    ):
+                        for month_num in range(1, 13):
+                            st.session_state.pop(
+                                (
+                                    f"pay_month_{payment_player['id']}_"
+                                    f"{second_year}_{month_num}"
+                                ),
+                                None,
+                            )
+                        st.session_state[second_year_key] = False
+                        st.rerun()
+
+                selected_months = sorted(set(selected_months))
 
                 st.caption(
-                    "Οι μήνες είναι ανεξάρτητοι "
-                    "μεταξύ τους. Αν δεν επιλεγεί "
-                    "ένας ενδιάμεσος μήνας, "
+                    "Οι μήνες είναι ανεξάρτητοι μεταξύ τους. "
+                    "Αν δεν επιλέξεις έναν ενδιάμεσο μήνα, "
                     "δεν θεωρείται αυτόματα οφειλή."
                 )
 
-                total_amount = (
-                    fee
-                    * len(selected_months)
-                )
-
-                st.metric(
-                    "Συνολικό ποσό",
-                    format_money(
-                        total_amount
-                    ),
-                )
+                total_amount = fee * len(selected_months)
+                st.metric("Συνολικό ποσό", format_money(total_amount))
 
                 if selected_months:
                     st.write(
                         "**Θα καταχωρηθούν:** "
-                        + ", ".join(
-                            month_label(m)
-                            for m in sorted(
-                                selected_months
-                            )
-                        )
+                        + ", ".join(month_label(m) for m in selected_months)
                     )
+                else:
+                    st.info("Δεν έχει επιλεγεί μήνας ακόμα.")
 
                 note = st.text_area(
                     "Σημείωση",
@@ -2175,114 +2224,67 @@ elif page == "💳 Πληρωμές":
                     key="save_multi_payment",
                 ):
                     if not selected_months:
-                        st.error(
-                            "Επίλεξε τουλάχιστον "
-                            "έναν μήνα."
-                        )
-
+                        st.error("Επίλεξε τουλάχιστον έναν μήνα.")
                     else:
                         duplicates = []
-
                         for m in selected_months:
                             existing = (
-                                sb.table(
-                                    "payments"
-                                )
+                                sb.table("payments")
                                 .select("id")
-                                .eq(
-                                    "player_id",
-                                    payment_player[
-                                        "id"
-                                    ],
-                                )
-                                .eq(
-                                    "coverage_month",
-                                    str(m),
-                                )
+                                .eq("player_id", payment_player["id"])
+                                .eq("coverage_month", str(m))
                                 .execute()
                                 .data
                             )
-
                             if existing:
-                                duplicates.append(
-                                    month_label(m)
-                                )
+                                duplicates.append(month_label(m))
 
                         if duplicates:
                             st.error(
-                                "Υπάρχει ήδη πληρωμή "
-                                "για: "
-                                + ", ".join(
-                                    duplicates
-                                )
+                                "Υπάρχει ήδη πληρωμή για: "
+                                + ", ".join(duplicates)
                             )
-
                         else:
-                            batch_id = str(
-                                uuid.uuid4()
-                            )
-
+                            batch_id = str(uuid.uuid4())
                             payload = [
                                 {
-                                    "player_id": (
-                                        payment_player[
-                                            "id"
-                                        ]
-                                    ),
+                                    "player_id": payment_player["id"],
                                     "amount": fee,
-                                    "paid_on": str(
-                                        paid_on
-                                    ),
-                                    "coverage_month": str(
-                                        m
-                                    ),
-                                    "payment_batch_id": (
-                                        batch_id
-                                    ),
-                                    "note": (
-                                        note.strip()
-                                        or None
-                                    ),
-                                    "recorded_by": (
-                                        st.session_state
-                                        .user.id
-                                    ),
+                                    "paid_on": str(paid_on),
+                                    "coverage_month": str(m),
+                                    "payment_batch_id": batch_id,
+                                    "note": note.strip() or None,
+                                    "recorded_by": st.session_state.user.id,
                                 }
-                                for m
-                                in selected_months
+                                for m in selected_months
                             ]
 
-                            (
-                                sb.table(
-                                    "payments"
-                                )
-                                .insert(payload)
-                                .execute()
-                            )
+                            sb.table("payments").insert(payload).execute()
 
-                            st.session_state.pop(
-                                (
-                                    "payment_months_multi_"
-                                    f"{payment_player['id']}"
-                                ),
-                                None,
-                            )
+                            years_to_clear = {primary_year}
+                            if second_year is not None:
+                                years_to_clear.add(second_year)
 
-                            set_flash(
-                                "✅ Η πληρωμή "
-                                "καταχωρήθηκε: "
-                                f"{format_money(total_amount)} "
-                                "για "
-                                + ", ".join(
-                                    month_label(m)
-                                    for m in sorted(
-                                        selected_months
+                            for y in years_to_clear:
+                                for month_num in range(1, 13):
+                                    st.session_state.pop(
+                                        (
+                                            f"pay_month_{payment_player['id']}_"
+                                            f"{y}_{month_num}"
+                                        ),
+                                        None,
                                     )
+
+                            st.session_state[second_year_key] = False
+                            set_flash(
+                                "✅ Η πληρωμή καταχωρήθηκε: "
+                                f"{format_money(total_amount)} για "
+                                + ", ".join(
+                                    month_label(m) for m in selected_months
                                 )
                                 + "."
                             )
                             st.rerun()
-
     # ---------------- Ιστορικό ----------------
     with tab_history:
         history_team = st.selectbox(
@@ -2296,32 +2298,112 @@ elif page == "💳 Πληρωμές":
             if p.get("team") == history_team
         ]
 
-        history_player = searchable_player_select(
-            "Παίκτης — αναζήτηση",
-            history_players,
-            key="payment_history_player",
+        payment_years = {
+            pd.to_datetime(r.get("coverage_month")).date().year
+            for r in payment_rows
+            if r.get("coverage_month")
+        }
+        payment_years.add(date.today().year)
+
+        history_year = st.selectbox(
+            "Έτος",
+            sorted(payment_years, reverse=True),
+            key="payment_history_year",
         )
 
-        if history_player:
-            hcols = st.columns([0.8, 4])
-            with hcols[0]:
-                show_player_photo(history_player, width=70)
-            hcols[1].markdown(
-                f"### {player_short_name(history_player)}\n"
-                f"**Μηνιαίο ποσό:** {format_money(history_player.get('monthly_fee'))}"
-            )
+        history_player = searchable_player_select(
+            "Παίκτης (προαιρετικά — αναζήτηση)",
+            history_players,
+            key="payment_history_player",
+            include_all=True,
+        )
 
+        displayed_history_players = (
+            [history_player]
+            if history_player
+            else history_players
+        )
+
+        st.subheader(f"Ιστορικό πληρωμών {history_year}")
+        st.caption(
+            "✅ = υπάρχει καταχωρημένη πληρωμή για τον μήνα. "
+            "Το — σημαίνει μόνο ότι δεν υπάρχει καταχώρηση· "
+            "δεν σημαίνει απαραίτητα οφειλή."
+        )
+
+        short_months = {
+            1: "Ιαν", 2: "Φεβ", 3: "Μαρ", 4: "Απρ",
+            5: "Μάι", 6: "Ιουν", 7: "Ιουλ", 8: "Αυγ",
+            9: "Σεπ", 10: "Οκτ", 11: "Νοε", 12: "Δεκ",
+        }
+
+        matrix_rows = []
+
+        for p in displayed_history_players:
+            row = {
+                "Νο": p.get("jersey_number") or "—",
+                "Ονοματεπώνυμο": p.get("full_name") or "—",
+            }
+
+            player_year_rows = [
+                r for r in payment_rows
+                if r.get("player_id") == p["id"]
+                and r.get("coverage_month")
+                and pd.to_datetime(r.get("coverage_month")).date().year
+                == history_year
+            ]
+
+            for month_num in range(1, 13):
+                month_rows = [
+                    r for r in player_year_rows
+                    if pd.to_datetime(r.get("coverage_month")).date().month
+                    == month_num
+                ]
+
+                if month_rows:
+                    month_total = sum(
+                        float(r.get("amount") or 0)
+                        for r in month_rows
+                    )
+                    row[short_months[month_num]] = (
+                        f"✅ {format_money(month_total)}"
+                    )
+                else:
+                    row[short_months[month_num]] = "—"
+
+            matrix_rows.append(row)
+
+        if matrix_rows:
+            st.dataframe(
+                pd.DataFrame(matrix_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("Δεν υπάρχουν παίκτες σε αυτό το τμήμα.")
+
+        if history_player:
             rows = [
                 r for r in payment_rows
                 if r.get("player_id") == history_player["id"]
+                and r.get("coverage_month")
+                and pd.to_datetime(r.get("coverage_month")).date().year
+                == history_year
             ]
 
-            if not rows:
-                st.info("Δεν έχει καταχωρηθεί πρώτη πληρωμή για αυτόν τον παίκτη.")
-            else:
-                # Σύνοψη ανά συναλλαγή/batch.
-                batches = {}
+            st.divider()
+            st.subheader(
+                f"Αναλυτικές συναλλαγές — "
+                f"{player_short_name(history_player)}"
+            )
 
+            if not rows:
+                st.info(
+                    "Δεν υπάρχουν καταχωρημένες πληρωμές "
+                    "για αυτόν τον παίκτη στο επιλεγμένο έτος."
+                )
+            else:
+                batches = {}
                 for r in rows:
                     batch = r.get("payment_batch_id") or r.get("id")
                     batches.setdefault(
@@ -2330,85 +2412,39 @@ elif page == "💳 Πληρωμές":
                             "paid_on": r.get("paid_on"),
                             "total": 0.0,
                             "months": [],
+                            "note": r.get("note") or "",
                         },
                     )
                     batches[batch]["total"] += float(r.get("amount") or 0)
+                    batches[batch]["months"].append(
+                        month_start(r.get("coverage_month"))
+                    )
 
-                    if r.get("coverage_month"):
-                        batches[batch]["months"].append(
-                            month_start(r.get("coverage_month"))
-                        )
-
-                st.subheader("Συναλλαγές")
-
-                batch_rows = []
-                for batch_id, data in sorted(
+                transaction_rows = []
+                for _, data in sorted(
                     batches.items(),
-                    key=lambda item: pd.to_datetime(item[1]["paid_on"]).date(),
+                    key=lambda item: pd.to_datetime(
+                        item[1]["paid_on"]
+                    ).date(),
                     reverse=True,
                 ):
                     months = sorted(set(data["months"]))
-                    batch_rows.append(
+                    transaction_rows.append(
                         {
                             "Ημερομηνία πληρωμής": format_date(data["paid_on"]),
                             "Συνολικό ποσό": format_money(data["total"]),
-                            "Μήνες": ", ".join(month_label(m) for m in months),
+                            "Μήνες": ", ".join(
+                                month_label(m) for m in months
+                            ),
+                            "Σημείωση": data["note"] or "—",
                         }
                     )
 
                 st.dataframe(
-                    pd.DataFrame(batch_rows),
+                    pd.DataFrame(transaction_rows),
                     use_container_width=True,
                     hide_index=True,
                 )
-
-                st.subheader("Αναλυτικές εγγραφές ανά μήνα")
-
-                rows = sorted(
-                    rows,
-                    key=lambda r: (
-                        pd.to_datetime(r.get("paid_on")).date(),
-                        pd.to_datetime(r.get("coverage_month")).date()
-                        if r.get("coverage_month")
-                        else date.min,
-                    ),
-                    reverse=True,
-                )
-
-                for r in rows:
-                    line = st.columns([1.4, 2.0, 1.2, 2.0, 1.0])
-
-                    line[0].write(format_date(r.get("paid_on")))
-                    line[1].write(
-                        month_label(r.get("coverage_month"))
-                        if r.get("coverage_month")
-                        else "—"
-                    )
-                    line[2].write(format_money(r.get("amount")))
-                    line[3].write(r.get("note") or "—")
-
-                    with line[4]:
-                        e1, e2 = st.columns(2)
-
-                        if e1.button(
-                            "✏️",
-                            key=f"history_edit_payment_{r['id']}",
-                            help="Edit",
-                        ):
-                            st.session_state["payment_manage_player_id"] = history_player["id"]
-                            st.session_state["payment_manage_mode"] = "edit"
-                            st.rerun()
-
-                        if e2.button(
-                            "🗑️",
-                            key=f"history_delete_payment_{r['id']}",
-                            help="Διαγραφή",
-                        ):
-                            st.session_state["payment_manage_player_id"] = history_player["id"]
-                            st.session_state["payment_manage_mode"] = "delete"
-                            st.rerun()
-
-                    st.divider()
 
 
 # ============================================================
