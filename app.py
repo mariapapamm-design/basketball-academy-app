@@ -1,6 +1,7 @@
 import io
 import uuid
 import calendar
+import html
 import streamlit as st
 import pandas as pd
 
@@ -422,6 +423,55 @@ def duplicate_player_exists(full_name, birth_date, exclude_id=None):
     return False
 
 
+
+@st.dialog("🗑️ Διαγραφή παίκτη")
+def player_delete_dialog(player):
+    st.markdown(
+        f"### {html.escape(str(player.get('full_name') or 'Παίκτης'))}",
+        unsafe_allow_html=True,
+    )
+
+    st.warning(
+        "Η οριστική διαγραφή διαγράφει μαζί τις παρουσίες "
+        "και τις πληρωμές που συνδέονται με τον παίκτη."
+    )
+
+    confirm_delete = st.checkbox(
+        "Επιβεβαίωση διαγραφής",
+        key=f"confirm_player_delete_dialog_{player['id']}",
+    )
+
+    c1, c2 = st.columns(2)
+
+    if c1.button(
+        "🗑️ Οριστική διαγραφή",
+        type="primary",
+        disabled=not confirm_delete,
+        key=f"delete_player_dialog_final_{player['id']}",
+        use_container_width=True,
+    ):
+        remove_player_photo(player.get("photo_path"))
+
+        (
+            get_user_client()
+            .table("players")
+            .delete()
+            .eq("id", player["id"])
+            .execute()
+        )
+
+        st.session_state.pop("edit_player_id", None)
+        set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
+        st.rerun()
+
+    if c2.button(
+        "Ακύρωση",
+        key=f"cancel_player_delete_dialog_{player['id']}",
+        use_container_width=True,
+    ):
+        st.rerun()
+
+
 def get_all_attendance():
     return (
         get_user_client()
@@ -585,8 +635,42 @@ def get_all_payments():
     )
 
 
-def player_payment_status(player_id, payment_rows):
-    rows = [r for r in payment_rows if r.get("player_id") == player_id]
+
+def get_payment_exemptions():
+    try:
+        return (
+            get_user_client()
+            .table("payment_month_exemptions")
+            .select("id,player_id,coverage_month,note,created_at,created_by")
+            .order("coverage_month", desc=True)
+            .limit(10000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+
+def is_exempt_month(player_id, month_value, exemptions):
+    target = month_start(month_value)
+
+    return any(
+        e.get("player_id") == player_id
+        and e.get("coverage_month")
+        and month_start(e.get("coverage_month")) == target
+        for e in exemptions
+    )
+
+
+def player_payment_status(player, payment_rows, exemptions=None):
+    exemptions = exemptions or []
+    player_id = player["id"]
+
+    rows = [
+        r for r in payment_rows
+        if r.get("player_id") == player_id
+    ]
 
     if not rows:
         return {
@@ -595,13 +679,28 @@ def player_payment_status(player_id, payment_rows):
             "last_paid_on": None,
             "next_due": None,
             "last_covered_month": None,
+            "anchor_day": None,
         }
 
-    last_paid_on = max(
+    paid_dates = sorted(
         pd.to_datetime(r.get("paid_on")).date()
         for r in rows
         if r.get("paid_on")
     )
+
+    if not paid_dates:
+        return {
+            "label": "Δεν έχει καταχωρηθεί πρώτη πληρωμή",
+            "state": "none",
+            "last_paid_on": None,
+            "next_due": None,
+            "last_covered_month": None,
+            "anchor_day": None,
+        }
+
+    first_paid_on = paid_dates[0]
+    last_paid_on = paid_dates[-1]
+    anchor_day = first_paid_on.day
 
     covered = [
         r for r in rows
@@ -615,21 +714,27 @@ def player_payment_status(player_id, payment_rows):
             "last_paid_on": last_paid_on,
             "next_due": None,
             "last_covered_month": None,
+            "anchor_day": anchor_day,
         }
 
-    latest_row = max(
-        covered,
-        key=lambda r: pd.to_datetime(r.get("coverage_month")).date(),
+    latest_month = max(
+        month_start(r.get("coverage_month"))
+        for r in covered
     )
 
-    latest_month = month_start(latest_row.get("coverage_month"))
-    anchor_paid_on = pd.to_datetime(latest_row.get("paid_on")).date()
     next_month = latest_month + relativedelta(months=1)
+
+    # Αν ένας μήνας έχει δηλωθεί «Δεν χρεώνεται»,
+    # η επόμενη πληρωμή μεταφέρεται στον επόμενο χρεώσιμο μήνα.
+    for _ in range(60):
+        if not is_exempt_month(player_id, next_month, exemptions):
+            break
+        next_month = next_month + relativedelta(months=1)
 
     next_due = safe_date_with_day(
         next_month.year,
         next_month.month,
-        anchor_paid_on.day,
+        anchor_day,
     )
 
     if date.today() > next_due:
@@ -645,6 +750,7 @@ def player_payment_status(player_id, payment_rows):
         "last_paid_on": last_paid_on,
         "next_due": next_due,
         "last_covered_month": latest_month,
+        "anchor_day": anchor_day,
     }
 
 
@@ -1012,236 +1118,113 @@ elif page == "👥 Παίκτες":
         )
 
         with tab_list:
+            st.markdown(
+                """
+                <style>
+                .player-list-header {
+                    font-size: 0.82rem;
+                    font-weight: 700;
+                    line-height: 1.15;
+                    padding: 0.15rem 0 0.25rem 0;
+                    white-space: nowrap;
+                }
+                .player-list-cell {
+                    font-size: 0.88rem;
+                    line-height: 1.2;
+                    padding-top: 0.42rem;
+                    overflow-wrap: anywhere;
+                }
+                div[data-testid="stButton"] > button {
+                    min-height: 2.15rem;
+                    padding: 0.25rem 0.55rem;
+                    font-size: 0.82rem;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
             if not players:
                 st.info("Δεν υπάρχουν παίκτες.")
 
             else:
-                header = st.columns(
-                    [
-                        0.6,
-                        0.7,
-                        2.4,
-                        1.6,
-                        1.8,
-                        1.2,
-                        0.8,
-                        1.2,
-                    ]
-                )
+                layout = [
+                    0.45,
+                    0.55,
+                    2.0,
+                    1.2,
+                    1.35,
+                    0.9,
+                    0.65,
+                    2.5,
+                ]
 
-                header[0].markdown("**Φωτο**")
-                header[1].markdown("**Νο**")
-                header[2].markdown(
-                    "**Ονοματεπώνυμο**"
-                )
-                header[3].markdown(
-                    "**Ημ. Γέννησης**"
-                )
-                header[4].markdown("**Τμήμα**")
-                header[5].markdown("**Μέγεθος**")
-                header[6].markdown("**Active**")
-                header[7].markdown(
-                    "**Ενέργειες**"
-                )
+                header = st.columns(layout)
+                header_labels = [
+                    "Φωτο",
+                    "Νο",
+                    "Ονοματεπώνυμο",
+                    "Ημ. Γέννησης",
+                    "Τμήμα",
+                    "Μέγεθος",
+                    "Active",
+                    "Ενέργειες",
+                ]
+
+                for col, label in zip(header, header_labels):
+                    col.markdown(
+                        f"<div class='player-list-header'>{label}</div>",
+                        unsafe_allow_html=True,
+                    )
 
                 st.divider()
 
                 for p in players:
-                    cols = st.columns(
-                        [
-                            0.6,
-                            0.7,
-                            2.4,
-                            1.6,
-                            1.8,
-                            1.2,
-                            0.8,
-                            1.2,
-                        ]
-                    )
+                    cols = st.columns(layout)
 
                     with cols[0]:
-                        show_player_photo(
-                            p,
-                            width=48,
-                        )
+                        show_player_photo(p, width=36)
 
-                    cols[1].write(
-                        p.get(
-                            "jersey_number"
-                        ) or "—"
-                    )
-                    cols[2].write(
-                        p.get("full_name")
-                        or "—"
-                    )
-                    cols[3].write(
-                        format_date(
-                            p.get(
-                                "birth_date"
-                            )
+                    values = [
+                        p.get("jersey_number") or "—",
+                        p.get("full_name") or "—",
+                        format_date(p.get("birth_date")),
+                        p.get("team") or "—",
+                        p.get("jersey_size") or "—",
+                        "✅" if p.get("active", True) else "—",
+                    ]
+
+                    for col, value in zip(cols[1:7], values):
+                        col.markdown(
+                            (
+                                "<div class='player-list-cell'>"
+                                f"{html.escape(str(value))}"
+                                "</div>"
+                            ),
+                            unsafe_allow_html=True,
                         )
-                    )
-                    cols[4].write(
-                        p.get("team") or "—"
-                    )
-                    cols[5].write(
-                        p.get(
-                            "jersey_size"
-                        ) or "—"
-                    )
-                    cols[6].write(
-                        "✅"
-                        if p.get(
-                            "active",
-                            True,
-                        )
-                        else "—"
-                    )
 
                     with cols[7]:
-                        c_edit, c_delete = (
-                            st.columns(2)
-                        )
+                        c_edit, c_delete = st.columns([1, 1.35])
 
                         if c_edit.button(
-                            "✏️",
-                            key=(
-                                "player_edit_btn_"
-                                f"{p['id']}"
-                            ),
-                            help="Edit",
+                            "✏️ Edit",
+                            key=f"player_edit_btn_{p['id']}",
+                            help="Edit παίκτη",
                             use_container_width=True,
                         ):
-                            st.session_state[
-                                "edit_player_id"
-                            ] = p["id"]
-
-                            st.session_state.pop(
-                                "delete_player_id",
-                                None,
-                            )
+                            st.session_state["edit_player_id"] = p["id"]
                             st.rerun()
 
                         if c_delete.button(
-                            "🗑️",
-                            key=(
-                                "player_delete_btn_"
-                                f"{p['id']}"
-                            ),
-                            help="Διαγραφή",
+                            "🗑️ Διαγραφή",
+                            key=f"player_delete_btn_{p['id']}",
+                            help="Διαγραφή παίκτη",
                             use_container_width=True,
                         ):
-                            st.session_state[
-                                "delete_player_id"
-                            ] = p["id"]
-
-                            st.session_state.pop(
-                                "edit_player_id",
-                                None,
-                            )
-                            st.rerun()
+                            player_delete_dialog(p)
 
                     st.divider()
-
-                delete_id = (
-                    st.session_state.get(
-                        "delete_player_id"
-                    )
-                )
-
-                if delete_id:
-                    selected = next(
-                        (
-                            p
-                            for p in players
-                            if p["id"]
-                            == delete_id
-                        ),
-                        None,
-                    )
-
-                    if selected:
-                        st.subheader(
-                            "🗑️ Διαγραφή — "
-                            f"{selected.get('full_name')}"
-                        )
-
-                        st.warning(
-                            "Η οριστική διαγραφή "
-                            "διαγράφει μαζί τις "
-                            "παρουσίες και τις πληρωμές "
-                            "που συνδέονται με τον παίκτη."
-                        )
-
-                        confirm_delete = (
-                            st.checkbox(
-                                "Επιβεβαίωση διαγραφής",
-                                key=(
-                                    "confirm_player_"
-                                    "delete_"
-                                    f"{selected['id']}"
-                                ),
-                            )
-                        )
-
-                        d1, d2 = st.columns(2)
-
-                        if d1.button(
-                            "Οριστική διαγραφή",
-                            type="primary",
-                            disabled=(
-                                not confirm_delete
-                            ),
-                            key=(
-                                "delete_player_"
-                                "final_"
-                                f"{selected['id']}"
-                            ),
-                            use_container_width=True,
-                        ):
-                            remove_player_photo(
-                                selected.get(
-                                    "photo_path"
-                                )
-                            )
-
-                            (
-                                sb.table(
-                                    "players"
-                                )
-                                .delete()
-                                .eq(
-                                    "id",
-                                    selected["id"],
-                                )
-                                .execute()
-                            )
-
-                            st.session_state.pop(
-                                "delete_player_id",
-                                None,
-                            )
-                            set_flash(
-                                "✅ Η διαγραφή "
-                                "ολοκληρώθηκε."
-                            )
-                            st.rerun()
-
-                        if d2.button(
-                            "Ακύρωση",
-                            key=(
-                                "cancel_player_"
-                                "delete_"
-                                f"{selected['id']}"
-                            ),
-                            use_container_width=True,
-                        ):
-                            st.session_state.pop(
-                                "delete_player_id",
-                                None,
-                            )
-                            st.rerun()
 
         with tab_new:
             with st.form("new_player"):
@@ -1773,15 +1756,17 @@ elif page == "💳 Πληρωμές":
         st.stop()
 
     payment_rows = get_all_payments()
+    payment_exemptions = get_payment_exemptions()
 
     payment_teams = [
         t for t in TEAMS
         if any(p.get("team") == t for p in players)
     ]
 
-    tab_status, tab_record, tab_history = st.tabs(
+    tab_status, tab_summary, tab_record, tab_history = st.tabs(
         [
             "Κατάσταση",
+            "📊 Μηνιαία εικόνα",
             "➕ Καταχώρηση πληρωμής",
             "Ιστορικό",
         ]
@@ -1823,7 +1808,7 @@ elif page == "💳 Πληρωμές":
         st.divider()
 
         for p in displayed_players:
-            status = player_payment_status(p["id"], payment_rows)
+            status = player_payment_status(p, payment_rows, payment_exemptions)
             cols = st.columns([0.55, 0.6, 2.2, 1.2, 1.5, 1.5, 1.7, 1.2])
 
             with cols[0]:
@@ -2031,6 +2016,240 @@ elif page == "💳 Πληρωμές":
                         st.session_state.pop("payment_manage_mode", None)
                         set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
                         st.rerun()
+
+
+    # ---------------- Μηνιαία οικονομική εικόνα ----------------
+    with tab_summary:
+        st.subheader("📊 Μηνιαία οικονομική εικόνα")
+
+        summary_team_options = ["Όλα τα τμήματα"] + payment_teams
+
+        s1, s2, s3 = st.columns([2, 1, 1])
+
+        summary_team = s1.selectbox(
+            "Τμήμα",
+            summary_team_options,
+            key="payment_summary_team",
+        )
+
+        available_years = {
+            date.today().year,
+            date.today().year - 1,
+            date.today().year + 1,
+        }
+
+        for r in payment_rows:
+            if r.get("coverage_month"):
+                available_years.add(
+                    month_start(r.get("coverage_month")).year
+                )
+
+        for e in payment_exemptions:
+            if e.get("coverage_month"):
+                available_years.add(
+                    month_start(e.get("coverage_month")).year
+                )
+
+        summary_years = sorted(available_years, reverse=True)
+
+        summary_year = s2.selectbox(
+            "Έτος",
+            summary_years,
+            index=(
+                summary_years.index(date.today().year)
+                if date.today().year in summary_years
+                else 0
+            ),
+            key="payment_summary_year",
+        )
+
+        summary_month_num = s3.selectbox(
+            "Μήνας",
+            list(range(1, 13)),
+            index=date.today().month - 1,
+            format_func=lambda m: GREEK_MONTHS[m],
+            key="payment_summary_month",
+        )
+
+        selected_summary_month = date(
+            summary_year,
+            summary_month_num,
+            1,
+        )
+
+        summary_players = [
+            p for p in players
+            if (
+                summary_team == "Όλα τα τμήματα"
+                or p.get("team") == summary_team
+            )
+        ]
+
+        summary_player_ids = {
+            p["id"] for p in summary_players
+        }
+
+        month_payments = [
+            r for r in payment_rows
+            if r.get("player_id") in summary_player_ids
+            and r.get("coverage_month")
+            and month_start(r.get("coverage_month"))
+            == selected_summary_month
+        ]
+
+        exempt_player_ids = {
+            e.get("player_id")
+            for e in payment_exemptions
+            if e.get("player_id") in summary_player_ids
+            and e.get("coverage_month")
+            and month_start(e.get("coverage_month"))
+            == selected_summary_month
+        }
+
+        expected_amount = sum(
+            float(p.get("monthly_fee") or 0)
+            for p in summary_players
+            if p["id"] not in exempt_player_ids
+        )
+
+        collected_amount = sum(
+            float(r.get("amount") or 0)
+            for r in month_payments
+        )
+
+        remaining_amount = max(
+            expected_amount - collected_amount,
+            0.0,
+        )
+
+        m1, m2, m3 = st.columns(3)
+
+        m1.metric(
+            "💰 Εισπράχθηκαν",
+            format_money(collected_amount),
+        )
+        m2.metric(
+            "🎯 Αναμενόμενα",
+            format_money(expected_amount),
+        )
+        m3.metric(
+            "⏳ Απομένουν",
+            format_money(remaining_amount),
+        )
+
+        st.caption(
+            "Το «Απομένουν» δεν περιλαμβάνει παίκτες που έχουν "
+            "δηλωθεί «Δεν χρεώνεται» για τον συγκεκριμένο μήνα."
+        )
+
+        st.divider()
+
+        if not summary_players:
+            st.info("Δεν υπάρχουν ενεργοί παίκτες για αυτή την επιλογή.")
+        else:
+            sh = st.columns(
+                [0.6, 2.3, 1.4, 1.3, 1.3, 1.8, 1.7]
+            )
+            sh[0].markdown("**Νο**")
+            sh[1].markdown("**Ονοματεπώνυμο**")
+            sh[2].markdown("**Τμήμα**")
+            sh[3].markdown("**Μηνιαίο**")
+            sh[4].markdown("**Πληρωμένο**")
+            sh[5].markdown("**Κατάσταση**")
+            sh[6].markdown("**Ενέργεια**")
+
+            st.divider()
+
+            paid_by_player = {}
+            for r in month_payments:
+                pid = r.get("player_id")
+                paid_by_player[pid] = (
+                    paid_by_player.get(pid, 0.0)
+                    + float(r.get("amount") or 0)
+                )
+
+            for p in summary_players:
+                pid = p["id"]
+                fee = float(p.get("monthly_fee") or 0)
+                paid = paid_by_player.get(pid, 0.0)
+                exempt = pid in exempt_player_ids
+
+                row = st.columns(
+                    [0.6, 2.3, 1.4, 1.3, 1.3, 1.8, 1.7]
+                )
+
+                row[0].write(p.get("jersey_number") or "—")
+                row[1].write(p.get("full_name") or "—")
+                row[2].write(p.get("team") or "—")
+                row[3].write(format_money(fee))
+                row[4].write(format_money(paid))
+
+                if paid >= fee and fee > 0:
+                    row[5].success("ΠΛΗΡΩΘΗΚΕ")
+                elif paid > 0:
+                    row[5].warning("ΜΕΡΙΚΗ")
+                elif exempt:
+                    row[5].info("ΔΕΝ ΧΡΕΩΝΕΤΑΙ")
+                else:
+                    row[5].warning("ΕΚΚΡΕΜΕΙ")
+
+                with row[6]:
+                    if paid > 0:
+                        st.caption("—")
+                    elif exempt:
+                        if st.button(
+                            "↩️ Χρεώνεται",
+                            key=(
+                                f"restore_charge_{pid}_"
+                                f"{selected_summary_month}"
+                            ),
+                            use_container_width=True,
+                        ):
+                            (
+                                sb.table("payment_month_exemptions")
+                                .delete()
+                                .eq("player_id", pid)
+                                .eq(
+                                    "coverage_month",
+                                    str(selected_summary_month),
+                                )
+                                .execute()
+                            )
+                            set_flash(
+                                "✅ Ο μήνας επανήλθε ως χρεώσιμος."
+                            )
+                            st.rerun()
+                    else:
+                        if st.button(
+                            "➖ Δεν χρεώνεται",
+                            key=(
+                                f"skip_charge_{pid}_"
+                                f"{selected_summary_month}"
+                            ),
+                            use_container_width=True,
+                        ):
+                            (
+                                sb.table("payment_month_exemptions")
+                                .insert(
+                                    {
+                                        "player_id": pid,
+                                        "coverage_month": str(
+                                            selected_summary_month
+                                        ),
+                                        "created_by": (
+                                            st.session_state.user.id
+                                        ),
+                                    }
+                                )
+                                .execute()
+                            )
+                            set_flash(
+                                "✅ Ο παίκτης σημειώθηκε ως "
+                                "«Δεν χρεώνεται» για τον μήνα."
+                            )
+                            st.rerun()
+
+                st.divider()
 
     # ---------------- Καταχώρηση πληρωμής ----------------
     with tab_record:
@@ -2261,6 +2480,18 @@ elif page == "💳 Πληρωμές":
 
                             sb.table("payments").insert(payload).execute()
 
+                            # Αν κάποιος μήνας είχε σημειωθεί παλιότερα
+                            # ως «Δεν χρεώνεται», η νέα πληρωμή τον
+                            # επαναφέρει αυτόματα ως κανονικά χρεώσιμο.
+                            for m in selected_months:
+                                (
+                                    sb.table("payment_month_exemptions")
+                                    .delete()
+                                    .eq("player_id", payment_player["id"])
+                                    .eq("coverage_month", str(m))
+                                    .execute()
+                                )
+
                             years_to_clear = {primary_year}
                             if second_year is not None:
                                 years_to_clear.add(second_year)
@@ -2327,6 +2558,7 @@ elif page == "💳 Πληρωμές":
         st.subheader(f"Ιστορικό πληρωμών {history_year}")
         st.caption(
             "✅ = υπάρχει καταχωρημένη πληρωμή για τον μήνα. "
+            "➖ = ο παίκτης έχει δηλωθεί «Δεν χρεώνεται». "
             "Το — σημαίνει μόνο ότι δεν υπάρχει καταχώρηση· "
             "δεν σημαίνει απαραίτητα οφειλή."
         )
@@ -2360,6 +2592,13 @@ elif page == "💳 Πληρωμές":
                     == month_num
                 ]
 
+                month_date = date(history_year, month_num, 1)
+                exempt = is_exempt_month(
+                    p["id"],
+                    month_date,
+                    payment_exemptions,
+                )
+
                 if month_rows:
                     month_total = sum(
                         float(r.get("amount") or 0)
@@ -2368,6 +2607,8 @@ elif page == "💳 Πληρωμές":
                     row[short_months[month_num]] = (
                         f"✅ {format_money(month_total)}"
                     )
+                elif exempt:
+                    row[short_months[month_num]] = "➖"
                 else:
                     row[short_months[month_num]] = "—"
 
