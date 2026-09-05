@@ -698,9 +698,7 @@ def player_payment_status(player, payment_rows, exemptions=None):
             "anchor_day": None,
         }
 
-    first_paid_on = paid_dates[0]
     last_paid_on = paid_dates[-1]
-    anchor_day = first_paid_on.day
 
     covered = [
         r for r in rows
@@ -721,6 +719,27 @@ def player_payment_status(player, payment_rows, exemptions=None):
         month_start(r.get("coverage_month"))
         for r in covered
     )
+
+    # Η ημέρα της επόμενης πληρωμής πρέπει να ακολουθεί
+    # την πραγματική ημερομηνία πληρωμής της συναλλαγής
+    # που καλύπτει τον τελευταίο πληρωμένο μήνα.
+    # Παράδειγμα:
+    # 05/09/2026 για Οκτ + Νοε + Δεκ -> επόμενη 05/01/2027.
+    latest_month_rows = [
+        r for r in covered
+        if month_start(r.get("coverage_month")) == latest_month
+        and r.get("paid_on")
+    ]
+
+    if latest_month_rows:
+        anchor_source_paid_on = max(
+            pd.to_datetime(r.get("paid_on")).date()
+            for r in latest_month_rows
+        )
+    else:
+        anchor_source_paid_on = last_paid_on
+
+    anchor_day = anchor_source_paid_on.day
 
     next_month = latest_month + relativedelta(months=1)
 
