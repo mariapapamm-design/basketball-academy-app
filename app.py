@@ -12,6 +12,9 @@ from dateutil.relativedelta import relativedelta
 from supabase import create_client
 
 APP_NAME = "Ταυροι Καλαμαριας Coaches 🏀"
+PASSWORD_RESET_REDIRECT_URL = (
+    "https://basketball-academy-kalamaria.streamlit.app/"
+)
 PHOTO_BUCKET = "player-photos"
 
 TEAMS = [
@@ -487,7 +490,130 @@ def load_profile(user_id):
     return result.data
 
 
+
+def clear_recovery_state():
+    for key in [
+        "recovery_sb",
+        "recovery_verified",
+        "show_forgot_password",
+    ]:
+        st.session_state.pop(key, None)
+
+
 def require_login():
+    # --------------------------------------------------------
+    # PASSWORD RECOVERY CALLBACK
+    # --------------------------------------------------------
+    token_hash = st.query_params.get("token_hash")
+    recovery_type = st.query_params.get("type")
+
+    if (
+        token_hash
+        and recovery_type == "recovery"
+        and "user" not in st.session_state
+    ):
+        st.markdown(
+            f"""
+            <div class="login-brand">
+                <img src="data:image/png;base64,{CLUB_LOGO_B64}" />
+                <h1>{APP_NAME}</h1>
+                <p>Ορισμός νέου κωδικού</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if not st.session_state.get("recovery_verified"):
+            try:
+                recovery_sb = public_client()
+                response = recovery_sb.auth.verify_otp(
+                    {
+                        "token_hash": str(token_hash),
+                        "type": "recovery",
+                    }
+                )
+
+                if not response.session:
+                    raise RuntimeError("Recovery session missing")
+
+                st.session_state.recovery_sb = recovery_sb
+                st.session_state.recovery_verified = True
+
+            except Exception:
+                st.error(
+                    "Ο σύνδεσμος επαναφοράς δεν είναι έγκυρος "
+                    "ή έχει λήξει. Ζήτησε νέο email επαναφοράς."
+                )
+
+                if st.button(
+                    "← Επιστροφή στη σύνδεση",
+                    use_container_width=True,
+                ):
+                    clear_recovery_state()
+                    st.query_params.clear()
+                    st.rerun()
+
+                st.stop()
+
+        with st.form("set_new_password_form"):
+            new_password = st.text_input(
+                "Νέος κωδικός",
+                type="password",
+            )
+            confirm_password = st.text_input(
+                "Επιβεβαίωση νέου κωδικού",
+                type="password",
+            )
+
+            update_password = st.form_submit_button(
+                "Αποθήκευση νέου κωδικού",
+                use_container_width=True,
+            )
+
+        if update_password:
+            if len(new_password) < 8:
+                st.error(
+                    "Ο νέος κωδικός πρέπει να έχει "
+                    "τουλάχιστον 8 χαρακτήρες."
+                )
+
+            elif new_password != confirm_password:
+                st.error("Οι δύο κωδικοί δεν είναι ίδιοι.")
+
+            else:
+                try:
+                    recovery_sb = st.session_state.recovery_sb
+
+                    recovery_sb.auth.update_user(
+                        {
+                            "password": new_password,
+                        }
+                    )
+
+                    try:
+                        recovery_sb.auth.sign_out()
+                    except Exception:
+                        pass
+
+                    clear_recovery_state()
+                    st.query_params.clear()
+                    st.session_state[
+                        "password_reset_done"
+                    ] = True
+                    st.rerun()
+
+                except Exception:
+                    st.error(
+                        "Δεν αποθηκεύτηκε ο νέος κωδικός. "
+                        "Ζήτησε νέο email επαναφοράς "
+                        "και δοκίμασε ξανά."
+                    )
+
+        st.stop()
+
+    # --------------------------------------------------------
+    # NORMAL LOGIN / FORGOT PASSWORD
+    # --------------------------------------------------------
     if "user" not in st.session_state:
         st.markdown(
             f"""
@@ -500,13 +626,97 @@ def require_login():
             unsafe_allow_html=True,
         )
 
+        if st.session_state.pop(
+            "password_reset_done",
+            False,
+        ):
+            st.success(
+                "✅ Ο κωδικός άλλαξε. "
+                "Μπορείς να συνδεθείς με τον νέο κωδικό."
+            )
+
+        if st.session_state.get(
+            "show_forgot_password",
+            False,
+        ):
+            st.subheader("Ξέχασα τον κωδικό μου")
+
+            st.caption(
+                "Γράψε το email του λογαριασμού σου. "
+                "Θα λάβεις email για να ορίσεις νέο κωδικό."
+            )
+
+            with st.form("forgot_password_form"):
+                recovery_email = st.text_input(
+                    "Email",
+                    key="recovery_email",
+                )
+
+                send_recovery = st.form_submit_button(
+                    "Αποστολή email επαναφοράς",
+                    use_container_width=True,
+                )
+
+            if send_recovery:
+                if not recovery_email.strip():
+                    st.error("Συμπλήρωσε το email σου.")
+
+                else:
+                    try:
+                        public_client().auth.reset_password_for_email(
+                            recovery_email.strip().lower(),
+                            {
+                                "redirect_to": (
+                                    PASSWORD_RESET_REDIRECT_URL
+                                ),
+                            },
+                        )
+
+                        st.success(
+                            "✅ Αν το email αντιστοιχεί σε "
+                            "ενεργό λογαριασμό, στάλθηκε μήνυμα "
+                            "επαναφοράς. Έλεγξε και τα Spam."
+                        )
+
+                    except Exception:
+                        # Ίδιο μήνυμα ώστε να μη διαρρέουμε
+                        # αν ένα email υπάρχει ή όχι.
+                        st.success(
+                            "✅ Αν το email αντιστοιχεί σε "
+                            "ενεργό λογαριασμό, στάλθηκε μήνυμα "
+                            "επαναφοράς. Έλεγξε και τα Spam."
+                        )
+
+            if st.button(
+                "← Επιστροφή στη σύνδεση",
+                use_container_width=True,
+            ):
+                st.session_state[
+                    "show_forgot_password"
+                ] = False
+                st.rerun()
+
+            st.stop()
+
         with st.form("login_form"):
             email = st.text_input("Email")
-            password = st.text_input("Κωδικός", type="password")
+            password = st.text_input(
+                "Κωδικός",
+                type="password",
+            )
             submitted = st.form_submit_button(
                 "Σύνδεση",
                 use_container_width=True,
             )
+
+        if st.button(
+            "Ξέχασα τον κωδικό μου;",
+            use_container_width=True,
+        ):
+            st.session_state[
+                "show_forgot_password"
+            ] = True
+            st.rerun()
 
         if submitted:
             try:
@@ -519,38 +729,67 @@ def require_login():
                 )
 
                 if not response.user:
-                    st.error("Δεν ήταν δυνατή η σύνδεση.")
+                    st.error(
+                        "Δεν ήταν δυνατή η σύνδεση."
+                    )
                     st.stop()
 
                 st.session_state.sb = sb
                 st.session_state.user = response.user
 
-                profile = load_profile(response.user.id)
+                profile = load_profile(
+                    response.user.id
+                )
 
-                if not profile or not profile.get("active", False):
+                if (
+                    not profile
+                    or not profile.get(
+                        "active",
+                        False,
+                    )
+                ):
                     try:
                         sb.auth.sign_out()
                     except Exception:
                         pass
 
-                    st.session_state.pop("user", None)
-                    st.session_state.pop("sb", None)
-                    st.error("Ο λογαριασμός δεν έχει ενεργή πρόσβαση.")
+                    st.session_state.pop(
+                        "user",
+                        None,
+                    )
+                    st.session_state.pop(
+                        "sb",
+                        None,
+                    )
+                    st.error(
+                        "Ο λογαριασμός δεν έχει "
+                        "ενεργή πρόσβαση."
+                    )
                     st.stop()
 
                 st.session_state.profile = profile
                 st.rerun()
 
             except Exception:
-                st.error("Λάθος email/κωδικός ή μη εγκεκριμένος λογαριασμός.")
+                st.error(
+                    "Λάθος email/κωδικός "
+                    "ή μη εγκεκριμένος λογαριασμός."
+                )
 
         st.stop()
 
-    # Φρέσκα δικαιώματα σε κάθε rerun, ώστε μια αλλαγή
-    # πρόσβασης από τον Admin να εφαρμόζεται αμέσως.
-    profile = load_profile(st.session_state.user.id)
+    # Φρέσκα δικαιώματα σε κάθε rerun.
+    profile = load_profile(
+        st.session_state.user.id
+    )
 
-    if not profile or not profile.get("active", False):
+    if (
+        not profile
+        or not profile.get(
+            "active",
+            False,
+        )
+    ):
         logout()
 
     st.session_state.profile = profile
@@ -1269,6 +1508,291 @@ def next_suggested_month(player_id, payment_rows):
         return date.today().replace(day=1)
 
     return max(covered) + relativedelta(months=1)
+
+
+
+# ============================================================
+# ADMIN USER DIALOGS
+# ============================================================
+
+@st.dialog("✏️ Edit χρήστη")
+def edit_user_dialog(user_id):
+    if not role_is_admin():
+        st.error("Δεν έχεις πρόσβαση.")
+        return
+
+    if user_id == st.session_state.user.id:
+        st.info(
+            "Ο τρέχων λογαριασμός δεν αλλάζει "
+            "από αυτή την οθόνη."
+        )
+        return
+
+    admin = admin_client()
+
+    selected = (
+        admin.table("profiles")
+        .select(
+            "id,email,full_name,role,active,"
+            "can_view_payments"
+        )
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    if not selected:
+        st.error("Ο χρήστης δεν βρέθηκε.")
+        return
+
+    with st.form(
+        f"edit_user_form_{user_id}"
+    ):
+        edit_name = st.text_input(
+            "Ονοματεπώνυμο",
+            value=selected.get(
+                "full_name"
+            ) or "",
+        )
+
+        edit_email = st.text_input(
+            "Email",
+            value=selected.get(
+                "email"
+            ) or "",
+        )
+
+        role_options = [
+            "coach",
+            "admin",
+        ]
+
+        current_role = (
+            selected.get("role")
+            if selected.get("role")
+            in role_options
+            else "coach"
+        )
+
+        edit_role = st.selectbox(
+            "Ρόλος",
+            role_options,
+            index=role_options.index(
+                current_role
+            ),
+        )
+
+        edit_active = st.toggle(
+            "Ενεργός λογαριασμός",
+            value=bool(
+                selected.get(
+                    "active",
+                    True,
+                )
+            ),
+        )
+
+        edit_payments = st.toggle(
+            "Πρόσβαση στις Πληρωμές",
+            value=bool(
+                selected.get(
+                    "can_view_payments",
+                    False,
+                )
+            ),
+            help=(
+                "Μόνο με αυτή τη ρητή άδεια "
+                "βλέπει Πληρωμές και οικονομικά ποσά."
+            ),
+        )
+
+        save_user = st.form_submit_button(
+            "💾 Αποθήκευση αλλαγών",
+            use_container_width=True,
+        )
+
+    if save_user:
+        normalized_email = (
+            edit_email.strip().lower()
+        )
+
+        if (
+            not edit_name.strip()
+            or not normalized_email
+        ):
+            st.error(
+                "Το όνομα και το email "
+                "είναι υποχρεωτικά."
+            )
+            return
+
+        try:
+            auth_payload = {
+                "email": normalized_email,
+                "email_confirm": True,
+                "user_metadata": {
+                    "full_name": (
+                        edit_name.strip()
+                    ),
+                },
+            }
+
+            admin.auth.admin.update_user_by_id(
+                user_id,
+                auth_payload,
+            )
+
+            (
+                admin.table("profiles")
+                .update(
+                    {
+                        "full_name": (
+                            edit_name.strip()
+                        ),
+                        "email": (
+                            normalized_email
+                        ),
+                        "role": edit_role,
+                        "active": bool(
+                            edit_active
+                        ),
+                        "can_view_payments": bool(
+                            edit_payments
+                        ),
+                    }
+                )
+                .eq("id", user_id)
+                .execute()
+            )
+
+            st.session_state.pop(
+                "user_edit_id",
+                None,
+            )
+            set_flash(
+                "✅ Ο χρήστης ενημερώθηκε."
+            )
+            st.rerun()
+
+        except Exception as e:
+            st.error(
+                "Δεν αποθηκεύτηκαν οι αλλαγές. "
+                f"{e}"
+            )
+
+
+@st.dialog("🗑️ Διαγραφή χρήστη")
+def delete_user_dialog(user_id):
+    if not role_is_admin():
+        st.error("Δεν έχεις πρόσβαση.")
+        return
+
+    if user_id == st.session_state.user.id:
+        st.error(
+            "Δεν μπορείς να διαγράψεις "
+            "τον λογαριασμό με τον οποίο "
+            "είσαι συνδεδεμένη."
+        )
+        return
+
+    admin = admin_client()
+
+    selected = (
+        admin.table("profiles")
+        .select(
+            "id,email,full_name,role"
+        )
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    if not selected:
+        st.error("Ο χρήστης δεν βρέθηκε.")
+        return
+
+    st.markdown(
+        "### "
+        + html.escape(
+            str(
+                selected.get(
+                    "full_name"
+                )
+                or selected.get("email")
+                or "Χρήστης"
+            )
+        ),
+        unsafe_allow_html=True,
+    )
+
+    st.warning(
+        "Ο χρήστης θα χάσει οριστικά "
+        "την πρόσβαση στην εφαρμογή."
+    )
+
+    confirm = st.checkbox(
+        "Επιβεβαίωση διαγραφής",
+        key=(
+            f"confirm_user_delete_"
+            f"{user_id}"
+        ),
+    )
+
+    c1, c2 = st.columns(2)
+
+    if c1.button(
+        "🗑️ Οριστική διαγραφή",
+        type="primary",
+        disabled=not confirm,
+        key=f"delete_user_final_{user_id}",
+        use_container_width=True,
+    ):
+        try:
+            # Πρώτα Auth: έτσι ο λογαριασμός
+            # δεν μπορεί πλέον να συνδεθεί.
+            admin.auth.admin.delete_user(
+                user_id
+            )
+
+            # Αν το profile δεν έφυγε με cascade,
+            # το καθαρίζουμε ρητά.
+            try:
+                (
+                    admin.table("profiles")
+                    .delete()
+                    .eq("id", user_id)
+                    .execute()
+                )
+            except Exception:
+                pass
+
+            st.session_state.pop(
+                "user_delete_id",
+                None,
+            )
+            set_flash(
+                "✅ Ο χρήστης διαγράφηκε."
+            )
+            st.rerun()
+
+        except Exception as e:
+            st.error(
+                "Δεν ολοκληρώθηκε η διαγραφή. "
+                f"{e}"
+            )
+
+    if c2.button(
+        "Ακύρωση",
+        key=f"cancel_user_delete_{user_id}",
+        use_container_width=True,
+    ):
+        st.session_state.pop(
+            "user_delete_id",
+            None,
+        )
+        st.rerun()
 
 
 # ============================================================
@@ -3858,6 +4382,7 @@ elif page == "💳 Πληρωμές":
 # ΧΡΗΣΤΕΣ - ADMIN
 # ============================================================
 
+
 elif page == "⚙️ Χρήστες":
     if not role_is_admin():
         st.error("Δεν έχεις πρόσβαση.")
@@ -3879,48 +4404,189 @@ elif page == "⚙️ Χρήστες":
         or []
     )
 
-    st.caption(f"Εγκεκριμένοι λογαριασμοί: {len(profiles)} / 10")
+    st.caption(
+        f"Εγκεκριμένοι λογαριασμοί: "
+        f"{len(profiles)} / 10"
+    )
 
     if profiles:
-        display_rows = []
+        header = st.columns(
+            [
+                2.1,
+                2.6,
+                0.9,
+                0.8,
+                1.0,
+                2.0,
+            ]
+        )
 
-        for p in profiles:
-            display_rows.append(
-                {
-                    "Ονοματεπώνυμο": p.get("full_name"),
-                    "Email": p.get("email"),
-                    "Ρόλος": p.get("role"),
-                    "Ενεργός": bool(p.get("active", True)),
-                    "Πληρωμές": (
-                        "✅"
-                        if p.get("can_view_payments")
-                        else "—"
-                    ),
-                }
+        labels = [
+            "Ονοματεπώνυμο",
+            "Email",
+            "Ρόλος",
+            "Active",
+            "Πληρωμές",
+            "Ενέργειες",
+        ]
+
+        for col, label in zip(
+            header,
+            labels,
+        ):
+            col.markdown(
+                f"**{label}**"
             )
 
-        st.dataframe(
-            pd.DataFrame(display_rows),
-            use_container_width=True,
-            hide_index=True,
+        st.divider()
+
+        for p in profiles:
+            cols = st.columns(
+                [
+                    2.1,
+                    2.6,
+                    0.9,
+                    0.8,
+                    1.0,
+                    2.0,
+                ]
+            )
+
+            cols[0].write(
+                p.get(
+                    "full_name"
+                ) or "—"
+            )
+
+            cols[1].write(
+                p.get("email")
+                or "—"
+            )
+
+            cols[2].write(
+                "Admin"
+                if p.get("role")
+                == "admin"
+                else "Coach"
+            )
+
+            cols[3].write(
+                "✅"
+                if p.get(
+                    "active",
+                    True,
+                )
+                else "—"
+            )
+
+            cols[4].write(
+                "✅"
+                if p.get(
+                    "can_view_payments"
+                )
+                else "—"
+            )
+
+            with cols[5]:
+                if (
+                    p["id"]
+                    == st.session_state.user.id
+                ):
+                    st.caption(
+                        "Τρέχων λογαριασμός"
+                    )
+
+                else:
+                    a1, a2 = st.columns(
+                        [1, 1.3]
+                    )
+
+                    if a1.button(
+                        "✏️ Edit",
+                        key=(
+                            f"user_edit_btn_"
+                            f"{p['id']}"
+                        ),
+                        use_container_width=True,
+                    ):
+                        st.session_state[
+                            "user_edit_id"
+                        ] = p["id"]
+                        st.session_state.pop(
+                            "user_delete_id",
+                            None,
+                        )
+                        st.rerun()
+
+                    if a2.button(
+                        "🗑️ Διαγραφή",
+                        key=(
+                            f"user_delete_btn_"
+                            f"{p['id']}"
+                        ),
+                        use_container_width=True,
+                    ):
+                        st.session_state[
+                            "user_delete_id"
+                        ] = p["id"]
+                        st.session_state.pop(
+                            "user_edit_id",
+                            None,
+                        )
+                        st.rerun()
+
+            st.divider()
+
+    edit_user_id = st.session_state.get(
+        "user_edit_id"
+    )
+
+    if edit_user_id:
+        edit_user_dialog(
+            edit_user_id
+        )
+
+    delete_user_id = st.session_state.get(
+        "user_delete_id"
+    )
+
+    if delete_user_id:
+        delete_user_dialog(
+            delete_user_id
         )
 
     st.subheader("➕ Δημιουργία προπονητή")
 
     with st.form("create_coach"):
-        coach_name = st.text_input("Ονοματεπώνυμο")
-        coach_email = st.text_input("Email")
+        coach_name = st.text_input(
+            "Ονοματεπώνυμο"
+        )
+
+        coach_email = st.text_input(
+            "Email"
+        )
+
         coach_password = st.text_input(
             "Προσωρινός κωδικός",
             type="password",
         )
+
         coach_role = st.selectbox(
             "Ρόλος",
-            ["coach", "admin"],
+            [
+                "coach",
+                "admin",
+            ],
         )
+
         payment_access = st.checkbox(
             "Να έχει πρόσβαση στις Πληρωμές",
             value=False,
+            help=(
+                "Αν δεν επιλεγεί, ο χρήστης "
+                "δεν βλέπει ούτε την κατηγορία "
+                "Πληρωμές ούτε οικονομικά ποσά."
+            ),
         )
 
         create = st.form_submit_button(
@@ -3930,7 +4596,10 @@ elif page == "⚙️ Χρήστες":
 
     if create:
         if len(profiles) >= 10:
-            st.error("Έχει συμπληρωθεί το όριο των 10 λογαριασμών.")
+            st.error(
+                "Έχει συμπληρωθεί το όριο "
+                "των 10 λογαριασμών."
+            )
 
         elif (
             not coach_name.strip()
@@ -3938,94 +4607,78 @@ elif page == "⚙️ Χρήστες":
             or len(coach_password) < 8
         ):
             st.error(
-                "Συμπλήρωσε όνομα, email και κωδικό "
-                "τουλάχιστον 8 χαρακτήρων."
+                "Συμπλήρωσε όνομα, email "
+                "και κωδικό τουλάχιστον "
+                "8 χαρακτήρων."
             )
 
         else:
             try:
-                response = admin.auth.admin.create_user(
-                    {
-                        "email": coach_email.strip().lower(),
-                        "password": coach_password,
-                        "email_confirm": True,
-                        "user_metadata": {
-                            "full_name": coach_name.strip()
-                        },
-                    }
+                normalized_email = (
+                    coach_email
+                    .strip()
+                    .lower()
                 )
 
-                admin.table("profiles").insert(
-                    {
-                        "id": response.user.id,
-                        "email": coach_email.strip().lower(),
-                        "full_name": coach_name.strip(),
-                        "role": coach_role,
-                        "active": True,
-                        "can_view_payments": bool(payment_access),
-                    }
-                ).execute()
+                response = (
+                    admin.auth.admin
+                    .create_user(
+                        {
+                            "email": (
+                                normalized_email
+                            ),
+                            "password": (
+                                coach_password
+                            ),
+                            "email_confirm": True,
+                            "user_metadata": {
+                                "full_name": (
+                                    coach_name
+                                    .strip()
+                                )
+                            },
+                        }
+                    )
+                )
 
-                set_flash("✅ Ο χρήστης δημιουργήθηκε.")
+                (
+                    admin.table("profiles")
+                    .insert(
+                        {
+                            "id": (
+                                response.user.id
+                            ),
+                            "email": (
+                                normalized_email
+                            ),
+                            "full_name": (
+                                coach_name
+                                .strip()
+                            ),
+                            "role": (
+                                coach_role
+                            ),
+                            "active": True,
+                            "can_view_payments": bool(
+                                payment_access
+                            ),
+                        }
+                    )
+                    .execute()
+                )
+
+                set_flash(
+                    "✅ Ο χρήστης δημιουργήθηκε."
+                )
                 st.rerun()
 
             except Exception as e:
-                st.error(f"Δεν δημιουργήθηκε ο χρήστης: {e}")
+                st.error(
+                    "Δεν δημιουργήθηκε "
+                    f"ο χρήστης: {e}"
+                )
 
-    st.subheader("Δικαιώματα χρήστη")
 
-    selectable = {
-        f'{p["full_name"]} — {p["email"]}': p
-        for p in profiles
-        if p["id"] != st.session_state.user.id
-    }
-
-    if selectable:
-        selected_user_label = st.selectbox(
-            "Χρήστης",
-            list(selectable.keys()),
-        )
-
-        selected_user = selectable[selected_user_label]
-
-        new_active = st.toggle(
-            "Ενεργός λογαριασμός",
-            value=bool(selected_user.get("active", True)),
-            key=f"active_{selected_user['id']}",
-        )
-
-        new_payment_access = st.toggle(
-            "Πρόσβαση στις Πληρωμές",
-            value=bool(
-                selected_user.get("can_view_payments", False)
-            ),
-            key=f"payaccess_{selected_user['id']}",
-            help=(
-                "Η άδεια είναι ρητή και ανεξάρτητη "
-                "από τον ρόλο Admin/Coach."
-            ),
-        )
-
-        if st.button(
-            "Αποθήκευση δικαιωμάτων",
-            use_container_width=True,
-        ):
-            payload = {
-                "active": new_active,
-                "can_view_payments": bool(
-                    new_payment_access
-                ),
-            }
-
-            (
-                admin.table("profiles")
-                .update(payload)
-                .eq("id", selected_user["id"])
-                .execute()
-            )
-
-            set_flash("✅ Τα δικαιώματα ενημερώθηκαν.")
-            st.rerun()
 
 
 st.caption(APP_NAME)
