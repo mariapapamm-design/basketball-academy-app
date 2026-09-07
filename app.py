@@ -2,10 +2,12 @@ import io
 import uuid
 import calendar
 import html
+import unicodedata
 import streamlit as st
 import pandas as pd
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from dateutil.relativedelta import relativedelta
 from supabase import create_client
 
@@ -544,13 +546,14 @@ def require_login():
 
         st.stop()
 
-    if "profile" not in st.session_state:
-        profile = load_profile(st.session_state.user.id)
+    # Φρέσκα δικαιώματα σε κάθε rerun, ώστε μια αλλαγή
+    # πρόσβασης από τον Admin να εφαρμόζεται αμέσως.
+    profile = load_profile(st.session_state.user.id)
 
-        if not profile or not profile.get("active", False):
-            logout()
+    if not profile or not profile.get("active", False):
+        logout()
 
-        st.session_state.profile = profile
+    st.session_state.profile = profile
 
 
 def role_is_admin():
@@ -558,7 +561,9 @@ def role_is_admin():
 
 
 def can_access_payments():
-    return role_is_admin() or bool(
+    # Ρητή άδεια μόνο. Ο ρόλος Admin ΔΕΝ δίνει αυτόματα
+    # πρόσβαση στις οικονομικές πληροφορίες.
+    return bool(
         st.session_state.profile.get("can_view_payments", False)
     )
 
@@ -680,6 +685,177 @@ def get_players(active_only=True):
         query = query.eq("active", True)
 
     return query.execute().data or []
+
+
+
+def get_player_fee_map():
+    """Οικονομικά στοιχεία μόνο για χρήστη με ρητή άδεια."""
+    if not can_access_payments():
+        return {}
+
+    rows = (
+        get_user_client()
+        .table("player_financial_settings")
+        .select("player_id,monthly_fee")
+        .execute()
+        .data
+        or []
+    )
+
+    return {
+        row["player_id"]: float(row.get("monthly_fee") or 0)
+        for row in rows
+    }
+
+
+def attach_player_fees(players):
+    if not can_access_payments():
+        return [dict(p) for p in players]
+
+    fee_map = get_player_fee_map()
+    output = []
+
+    for p in players:
+        item = dict(p)
+        item["monthly_fee"] = fee_map.get(p["id"], 0.0)
+        output.append(item)
+
+    return output
+
+
+def set_player_monthly_fee(player_id, monthly_fee):
+    if not can_access_payments():
+        raise PermissionError(
+            "Δεν υπάρχει άδεια πρόσβασης στις Πληρωμές."
+        )
+
+    (
+        get_user_client()
+        .table("player_financial_settings")
+        .upsert(
+            {
+                "player_id": player_id,
+                "monthly_fee": float(monthly_fee),
+                "updated_by": st.session_state.user.id,
+            },
+            on_conflict="player_id",
+        )
+        .execute()
+    )
+
+
+def normalize_search_text(value):
+    text = unicodedata.normalize(
+        "NFD",
+        str(value or "").casefold(),
+    )
+    return "".join(
+        ch for ch in text
+        if unicodedata.category(ch) != "Mn"
+    ).strip()
+
+
+GREEK_WEEKDAYS = {
+    0: "Δευτέρα",
+    1: "Τρίτη",
+    2: "Τετάρτη",
+    3: "Πέμπτη",
+    4: "Παρασκευή",
+    5: "Σάββατο",
+    6: "Κυριακή",
+}
+
+GREEK_WEEKDAYS_SHORT = {
+    0: "Δευ",
+    1: "Τρι",
+    2: "Τετ",
+    3: "Πέμ",
+    4: "Παρ",
+    5: "Σάβ",
+    6: "Κυρ",
+}
+
+ATHENS_TZ = ZoneInfo("Europe/Athens")
+
+
+def get_training_schedule(active_only=True):
+    query = (
+        get_user_client()
+        .table("training_schedule")
+        .select(
+            "id,day_of_week,start_time,end_time,"
+            "team,venue,notes,active,created_by,created_at"
+        )
+        .order("day_of_week")
+        .order("start_time")
+    )
+
+    if active_only:
+        query = query.eq("active", True)
+
+    return query.execute().data or []
+
+
+def parse_schedule_time(value):
+    raw = str(value or "00:00:00")
+    return datetime.strptime(raw[:5], "%H:%M").time()
+
+
+def schedule_occurrences(schedule_rows, start_date, days=14):
+    occurrences = []
+
+    for offset in range(days):
+        occurrence_date = start_date + timedelta(days=offset)
+
+        for row in schedule_rows:
+            if int(row.get("day_of_week", -1)) != occurrence_date.weekday():
+                continue
+
+            start_clock = parse_schedule_time(row.get("start_time"))
+            end_clock = parse_schedule_time(row.get("end_time"))
+
+            start_dt = datetime.combine(
+                occurrence_date,
+                start_clock,
+            ).replace(tzinfo=ATHENS_TZ)
+
+            end_dt = datetime.combine(
+                occurrence_date,
+                end_clock,
+            ).replace(tzinfo=ATHENS_TZ)
+
+            item = dict(row)
+            item["occurrence_date"] = occurrence_date
+            item["start_dt"] = start_dt
+            item["end_dt"] = end_dt
+            occurrences.append(item)
+
+    return sorted(
+        occurrences,
+        key=lambda x: (x["start_dt"], x["team"]),
+    )
+
+
+def training_status_label(start_dt, end_dt, now):
+    if now > end_dt:
+        return "Ολοκληρώθηκε"
+
+    if start_dt <= now <= end_dt:
+        return "Τώρα"
+
+    minutes = max(
+        0,
+        int((start_dt - now).total_seconds() // 60),
+    )
+
+    if minutes < 60:
+        return f"Σε {minutes}′"
+
+    hours = round(minutes / 60)
+    if hours == 1:
+        return "Σε 1 ώρα"
+
+    return f"Σε {hours} ώρες"
 
 
 def player_short_name(player):
@@ -1021,7 +1197,7 @@ def player_payment_status(player, payment_rows, exemptions=None):
             "last_paid_on": last_paid_on,
             "next_due": None,
             "last_covered_month": None,
-            "anchor_day": anchor_day,
+            "anchor_day": None,
         }
 
     latest_month = max(
@@ -1139,6 +1315,7 @@ pages = [
     "🏠 Dashboard",
     "👥 Παίκτες",
     "✅ Παρουσίες",
+    "📅 Πρόγραμμα",
 ]
 
 if can_access_payments():
@@ -1170,45 +1347,140 @@ show_flash()
 if page == "🏠 Dashboard":
     st.title("Dashboard")
 
-    players = get_players()
-    attendance = get_all_attendance()
+    now = datetime.now(ATHENS_TZ)
+    today = now.date()
+    schedule_rows = get_training_schedule()
 
-    total_records = len(attendance)
-    total_present = sum(1 for x in attendance if x.get("present") is True)
-
-    attendance_pct = (
-        round((total_present / total_records) * 100, 1)
-        if total_records > 0
-        else 0
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Ενεργοί παίκτες", len(players))
-    c2.metric("Καταχωρήσεις παρουσιών", total_records)
-    c3.metric("Συνολική παρουσία", f"{attendance_pct}%")
-
-    st.subheader("Παίκτες")
-
-    if players:
-        rows = []
-        for p in players:
-            rows.append(
-                {
-                    "Νο": p.get("jersey_number") or "—",
-                    "Ονοματεπώνυμο": p.get("full_name"),
-                    "Ημερομηνία Γέννησης": format_date(p.get("birth_date")),
-                    "Τμήμα": p.get("team") or "—",
-                    "Active": bool(p.get("active", True)),
-                }
-            )
-
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
+    today_occurrences = [
+        item
+        for item in schedule_occurrences(
+            schedule_rows,
+            today,
+            days=1,
         )
-    else:
-        st.info("Δεν έχουν προστεθεί παίκτες ακόμη.")
+    ]
+
+    upcoming_occurrences = [
+        item
+        for item in schedule_occurrences(
+            schedule_rows,
+            today + timedelta(days=1),
+            days=14,
+        )
+    ][:7]
+
+    with st.container(border=True):
+        h1, h2 = st.columns([2, 1])
+        h1.markdown("### 🗓️ Σήμερα")
+        h2.markdown(
+            (
+                "<div style='text-align:right; padding-top:.35rem; "
+                "color:#667085; font-size:.9rem;'>"
+                f"{GREEK_WEEKDAYS[today.weekday()]} "
+                f"{today.strftime('%d/%m/%Y')}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+        if not today_occurrences:
+            st.info("Δεν υπάρχουν προπονήσεις σήμερα.")
+        else:
+            for item in today_occurrences:
+                cols = st.columns(
+                    [1.25, 0.22, 2.7, 1.15]
+                )
+
+                cols[0].markdown(
+                    (
+                        "<div style='font-weight:700; "
+                        "padding-top:.38rem;'>"
+                        f"{item['start_dt'].strftime('%H:%M')} – "
+                        f"{item['end_dt'].strftime('%H:%M')}"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+                cols[1].markdown(
+                    (
+                        "<div style='font-size:1.15rem; "
+                        "color:#F7941D; padding-top:.22rem;'>●</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+                venue = html.escape(
+                    str(item.get("venue") or "—")
+                )
+                team = html.escape(
+                    str(item.get("team") or "—")
+                )
+
+                cols[2].markdown(
+                    (
+                        "<div style='line-height:1.25;'>"
+                        f"<strong>{team}</strong><br>"
+                        "<span style='color:#667085; "
+                        "font-size:.82rem;'>"
+                        f"{venue}</span>"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+                label = training_status_label(
+                    item["start_dt"],
+                    item["end_dt"],
+                    now,
+                )
+                cols[3].markdown(
+                    (
+                        "<div style='text-align:center; "
+                        "background:#EEF6FF; color:#1570EF; "
+                        "border-radius:999px; padding:.3rem .55rem; "
+                        "font-size:.76rem; font-weight:700;'>"
+                        f"{html.escape(label)}"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+                st.divider()
+
+    with st.container(border=True):
+        st.markdown("### 🗓️ Επόμενες προπονήσεις")
+
+        if not upcoming_occurrences:
+            st.info(
+                "Δεν υπάρχουν επόμενες προπονήσεις "
+                "στο πρόγραμμα των επόμενων 14 ημερών."
+            )
+        else:
+            upcoming_rows = []
+
+            for item in upcoming_occurrences:
+                d = item["occurrence_date"]
+                upcoming_rows.append(
+                    {
+                        "Ημερομηνία": (
+                            f"{GREEK_WEEKDAYS_SHORT[d.weekday()]} "
+                            f"{d.strftime('%d/%m')}"
+                        ),
+                        "Ώρα": (
+                            f"{item['start_dt'].strftime('%H:%M')} – "
+                            f"{item['end_dt'].strftime('%H:%M')}"
+                        ),
+                        "Τμήμα": item.get("team") or "—",
+                        "Γήπεδο": item.get("venue") or "—",
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(upcoming_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 # ============================================================
@@ -1217,6 +1489,9 @@ if page == "🏠 Dashboard":
 
 elif page == "👥 Παίκτες":
     players = get_players(active_only=False)
+
+    if can_access_payments():
+        players = attach_player_fees(players)
 
     # ========================================================
     # FULL PAGE EDIT
@@ -1286,8 +1561,10 @@ elif page == "👥 Παίκτες":
             else 0
         )
 
-        current_fee = float(
-            selected.get("monthly_fee") or 0
+        current_fee = (
+            float(selected.get("monthly_fee") or 0)
+            if can_access_payments()
+            else None
         )
 
         with st.form(
@@ -1325,12 +1602,13 @@ elif page == "👥 Παίκτες":
                 index=size_index,
             )
 
-            edit_fee = st.number_input(
-                "Μηνιαίο ποσό (€)",
-                min_value=0.0,
-                value=current_fee,
-                step=5.0,
-            )
+            if can_access_payments():
+                edit_fee = st.number_input(
+                    "Μηνιαίο ποσό (€)",
+                    min_value=0.0,
+                    value=float(current_fee or 0),
+                    step=5.0,
+                )
 
             edit_photo = st.file_uploader(
                 "Νέα φωτογραφία (προαιρετικό)",
@@ -1430,9 +1708,6 @@ elif page == "👥 Παίκτες":
                                 or None
                             ),
                             "jersey_size": edit_size,
-                            "monthly_fee": float(
-                                edit_fee
-                            ),
                             "photo_path": photo_path,
                             "notes": (
                                 edit_notes.strip()
@@ -1449,6 +1724,12 @@ elif page == "👥 Παίκτες":
                     )
                     .execute()
                 )
+
+                if can_access_payments():
+                    set_player_monthly_fee(
+                        selected["id"],
+                        edit_fee,
+                    )
 
                 st.session_state.pop(
                     "edit_player_id",
@@ -1625,14 +1906,13 @@ elif page == "👥 Παίκτες":
                     )
                 )
 
-                monthly_fee = (
-                    st.number_input(
+                if can_access_payments():
+                    monthly_fee = st.number_input(
                         "Μηνιαίο ποσό (€)",
                         min_value=0.0,
                         value=0.0,
                         step=5.0,
                     )
-                )
 
                 photo = st.file_uploader(
                     "Φωτογραφία παίκτη",
@@ -1692,9 +1972,6 @@ elif page == "👥 Παίκτες":
                                 "jersey_size": (
                                     jersey_size
                                 ),
-                                "monthly_fee": float(
-                                    monthly_fee
-                                ),
                                 "notes": (
                                     notes.strip()
                                     or None
@@ -1714,6 +1991,15 @@ elif page == "👥 Παίκτες":
                         if response.data
                         else None
                     )
+
+                    if (
+                        new_player
+                        and can_access_payments()
+                    ):
+                        set_player_monthly_fee(
+                            new_player["id"],
+                            monthly_fee,
+                        )
 
                     if (
                         new_player
@@ -2095,6 +2381,433 @@ elif page == "✅ Παρουσίες":
 
 
 # ============================================================
+# ΠΡΟΓΡΑΜΜΑ
+# ============================================================
+
+elif page == "📅 Πρόγραμμα":
+    st.title("Πρόγραμμα προπονήσεων")
+
+    schedule_rows = get_training_schedule(
+        active_only=False
+    )
+
+    if role_is_admin():
+        with st.expander(
+            "➕ Νέα προπόνηση",
+            expanded=False,
+        ):
+            with st.form("new_training_schedule"):
+                new_day = st.selectbox(
+                    "Ημέρα",
+                    list(GREEK_WEEKDAYS.keys()),
+                    format_func=lambda x: GREEK_WEEKDAYS[x],
+                )
+
+                c1, c2 = st.columns(2)
+                new_start = c1.time_input(
+                    "Ώρα έναρξης",
+                    value=datetime.strptime(
+                        "17:00",
+                        "%H:%M",
+                    ).time(),
+                )
+                new_end = c2.time_input(
+                    "Ώρα λήξης",
+                    value=datetime.strptime(
+                        "18:00",
+                        "%H:%M",
+                    ).time(),
+                )
+
+                new_team = st.selectbox(
+                    "Τμήμα",
+                    TEAMS,
+                )
+
+                new_venue = st.text_input(
+                    "Γήπεδο",
+                    value="Κλειστό Καλαμαριάς",
+                )
+
+                new_notes = st.text_area(
+                    "Σημειώσεις",
+                )
+
+                create_training = (
+                    st.form_submit_button(
+                        "Αποθήκευση προπόνησης",
+                        use_container_width=True,
+                    )
+                )
+
+            if create_training:
+                if new_end <= new_start:
+                    st.error(
+                        "Η ώρα λήξης πρέπει να είναι "
+                        "μετά την ώρα έναρξης."
+                    )
+                else:
+                    (
+                        sb.table("training_schedule")
+                        .insert(
+                            {
+                                "day_of_week": int(new_day),
+                                "start_time": new_start.strftime(
+                                    "%H:%M:%S"
+                                ),
+                                "end_time": new_end.strftime(
+                                    "%H:%M:%S"
+                                ),
+                                "team": new_team,
+                                "venue": (
+                                    new_venue.strip()
+                                    or None
+                                ),
+                                "notes": (
+                                    new_notes.strip()
+                                    or None
+                                ),
+                                "active": True,
+                                "created_by": (
+                                    st.session_state.user.id
+                                ),
+                            }
+                        )
+                        .execute()
+                    )
+
+                    set_flash(
+                        "✅ Η προπόνηση προστέθηκε."
+                    )
+                    st.rerun()
+
+    if not schedule_rows:
+        st.info(
+            "Δεν έχει καταχωρηθεί ακόμη πρόγραμμα "
+            "προπονήσεων."
+        )
+    else:
+        for day_num in range(7):
+            day_rows = [
+                row for row in schedule_rows
+                if int(row.get("day_of_week", -1))
+                == day_num
+            ]
+
+            if not day_rows:
+                continue
+
+            st.subheader(GREEK_WEEKDAYS[day_num])
+
+            for row in day_rows:
+                cols = st.columns(
+                    [1.25, 2.1, 2.0, 0.8, 1.6]
+                )
+
+                start_label = str(
+                    row.get("start_time") or ""
+                )[:5]
+                end_label = str(
+                    row.get("end_time") or ""
+                )[:5]
+
+                cols[0].write(
+                    f"{start_label} – {end_label}"
+                )
+                cols[1].write(
+                    row.get("team") or "—"
+                )
+                cols[2].write(
+                    row.get("venue") or "—"
+                )
+                cols[3].write(
+                    "✅"
+                    if row.get("active", True)
+                    else "—"
+                )
+
+                if role_is_admin():
+                    with cols[4]:
+                        e1, e2 = st.columns(2)
+
+                        if e1.button(
+                            "✏️",
+                            key=(
+                                "schedule_edit_"
+                                f"{row['id']}"
+                            ),
+                            help="Edit",
+                            use_container_width=True,
+                        ):
+                            st.session_state[
+                                "schedule_edit_id"
+                            ] = row["id"]
+                            st.rerun()
+
+                        if e2.button(
+                            "🗑️",
+                            key=(
+                                "schedule_delete_"
+                                f"{row['id']}"
+                            ),
+                            help="Διαγραφή",
+                            use_container_width=True,
+                        ):
+                            st.session_state[
+                                "schedule_delete_id"
+                            ] = row["id"]
+                            st.rerun()
+
+                st.divider()
+
+    edit_schedule_id = st.session_state.get(
+        "schedule_edit_id"
+    )
+
+    if role_is_admin() and edit_schedule_id:
+        selected_schedule = next(
+            (
+                row for row in schedule_rows
+                if row["id"] == edit_schedule_id
+            ),
+            None,
+        )
+
+        if selected_schedule:
+            @st.dialog("✏️ Edit προπόνησης")
+            def edit_schedule_dialog():
+                current_day = int(
+                    selected_schedule.get(
+                        "day_of_week",
+                        0,
+                    )
+                )
+
+                edit_day = st.selectbox(
+                    "Ημέρα",
+                    list(GREEK_WEEKDAYS.keys()),
+                    index=current_day,
+                    format_func=lambda x: (
+                        GREEK_WEEKDAYS[x]
+                    ),
+                    key="edit_schedule_day",
+                )
+
+                c1, c2 = st.columns(2)
+                edit_start = c1.time_input(
+                    "Ώρα έναρξης",
+                    value=parse_schedule_time(
+                        selected_schedule.get(
+                            "start_time"
+                        )
+                    ),
+                    key="edit_schedule_start",
+                )
+                edit_end = c2.time_input(
+                    "Ώρα λήξης",
+                    value=parse_schedule_time(
+                        selected_schedule.get(
+                            "end_time"
+                        )
+                    ),
+                    key="edit_schedule_end",
+                )
+
+                current_team = (
+                    selected_schedule.get("team")
+                )
+                team_index = (
+                    TEAMS.index(current_team)
+                    if current_team in TEAMS
+                    else 0
+                )
+
+                edit_team = st.selectbox(
+                    "Τμήμα",
+                    TEAMS,
+                    index=team_index,
+                    key="edit_schedule_team",
+                )
+
+                edit_venue = st.text_input(
+                    "Γήπεδο",
+                    value=(
+                        selected_schedule.get(
+                            "venue"
+                        )
+                        or ""
+                    ),
+                    key="edit_schedule_venue",
+                )
+
+                edit_notes = st.text_area(
+                    "Σημειώσεις",
+                    value=(
+                        selected_schedule.get(
+                            "notes"
+                        )
+                        or ""
+                    ),
+                    key="edit_schedule_notes",
+                )
+
+                edit_active = st.checkbox(
+                    "Ενεργή",
+                    value=bool(
+                        selected_schedule.get(
+                            "active",
+                            True,
+                        )
+                    ),
+                    key="edit_schedule_active",
+                )
+
+                csave, ccancel = st.columns(2)
+
+                if csave.button(
+                    "💾 Αποθήκευση",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    if edit_end <= edit_start:
+                        st.error(
+                            "Η ώρα λήξης πρέπει να "
+                            "είναι μετά την ώρα έναρξης."
+                        )
+                    else:
+                        (
+                            sb.table(
+                                "training_schedule"
+                            )
+                            .update(
+                                {
+                                    "day_of_week": int(
+                                        edit_day
+                                    ),
+                                    "start_time": (
+                                        edit_start.strftime(
+                                            "%H:%M:%S"
+                                        )
+                                    ),
+                                    "end_time": (
+                                        edit_end.strftime(
+                                            "%H:%M:%S"
+                                        )
+                                    ),
+                                    "team": edit_team,
+                                    "venue": (
+                                        edit_venue.strip()
+                                        or None
+                                    ),
+                                    "notes": (
+                                        edit_notes.strip()
+                                        or None
+                                    ),
+                                    "active": bool(
+                                        edit_active
+                                    ),
+                                }
+                            )
+                            .eq(
+                                "id",
+                                selected_schedule[
+                                    "id"
+                                ],
+                            )
+                            .execute()
+                        )
+
+                        st.session_state.pop(
+                            "schedule_edit_id",
+                            None,
+                        )
+                        set_flash(
+                            "✅ Η προπόνηση "
+                            "ενημερώθηκε."
+                        )
+                        st.rerun()
+
+                if ccancel.button(
+                    "Ακύρωση",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(
+                        "schedule_edit_id",
+                        None,
+                    )
+                    st.rerun()
+
+            edit_schedule_dialog()
+
+    delete_schedule_id = st.session_state.get(
+        "schedule_delete_id"
+    )
+
+    if role_is_admin() and delete_schedule_id:
+        selected_schedule = next(
+            (
+                row for row in schedule_rows
+                if row["id"] == delete_schedule_id
+            ),
+            None,
+        )
+
+        if selected_schedule:
+            @st.dialog("🗑️ Διαγραφή προπόνησης")
+            def delete_schedule_dialog():
+                st.warning(
+                    "Η προπόνηση θα αφαιρεθεί "
+                    "από το εβδομαδιαίο πρόγραμμα."
+                )
+
+                confirm = st.checkbox(
+                    "Επιβεβαίωση διαγραφής",
+                    key="confirm_schedule_delete",
+                )
+
+                cdelete, ccancel = st.columns(2)
+
+                if cdelete.button(
+                    "Οριστική διαγραφή",
+                    type="primary",
+                    disabled=not confirm,
+                    use_container_width=True,
+                ):
+                    (
+                        sb.table(
+                            "training_schedule"
+                        )
+                        .delete()
+                        .eq(
+                            "id",
+                            selected_schedule["id"],
+                        )
+                        .execute()
+                    )
+
+                    st.session_state.pop(
+                        "schedule_delete_id",
+                        None,
+                    )
+                    set_flash(
+                        "✅ Η προπόνηση διαγράφηκε."
+                    )
+                    st.rerun()
+
+                if ccancel.button(
+                    "Ακύρωση",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(
+                        "schedule_delete_id",
+                        None,
+                    )
+                    st.rerun()
+
+            delete_schedule_dialog()
+
+
+# ============================================================
 # ΠΛΗΡΩΜΕΣ
 # ============================================================
 
@@ -2105,7 +2818,9 @@ elif page == "💳 Πληρωμές":
 
     st.title("Πληρωμές")
 
-    players = get_players()
+    players = attach_player_fees(
+        get_players()
+    )
 
     if not players:
         st.info("Δεν υπάρχουν ενεργοί παίκτες.")
@@ -2141,16 +2856,38 @@ elif page == "💳 Πληρωμές":
             if p.get("team") == selected_team
         ]
 
-        status_player = searchable_player_select(
-            "Παίκτης (προαιρετικά — αναζήτηση)",
-            team_players,
-            key="payments_status_player",
-            include_all=True,
+        status_search = st.text_input(
+            "🔎 Αναζήτηση παίκτη",
+            placeholder=(
+                "Γράψε όνομα, επώνυμο ή νούμερο φανέλας — "
+                "άφησέ το κενό για όλους"
+            ),
+            key="payments_status_search",
         )
 
-        displayed_players = (
-            [status_player] if status_player else team_players
-        )
+        search_term = normalize_search_text(status_search)
+
+        if search_term:
+            displayed_players = [
+                p for p in team_players
+                if (
+                    search_term
+                    in normalize_search_text(
+                        p.get("full_name")
+                    )
+                    or search_term
+                    in normalize_search_text(
+                        p.get("jersey_number")
+                    )
+                )
+            ]
+        else:
+            displayed_players = team_players
+
+        if search_term and not displayed_players:
+            st.info(
+                "Δεν βρέθηκε παίκτης με αυτή την αναζήτηση."
+            )
 
         payment_layout = [
             0.42,
@@ -3156,10 +3893,7 @@ elif page == "⚙️ Χρήστες":
                     "Ενεργός": bool(p.get("active", True)),
                     "Πληρωμές": (
                         "✅"
-                        if (
-                            p.get("role") == "admin"
-                            or p.get("can_view_payments")
-                        )
+                        if p.get("can_view_payments")
                         else "—"
                     ),
                 }
@@ -3266,7 +4000,10 @@ elif page == "⚙️ Χρήστες":
                 selected_user.get("can_view_payments", False)
             ),
             key=f"payaccess_{selected_user['id']}",
-            disabled=selected_user.get("role") == "admin",
+            help=(
+                "Η άδεια είναι ρητή και ανεξάρτητη "
+                "από τον ρόλο Admin/Coach."
+            ),
         )
 
         if st.button(
@@ -3275,10 +4012,8 @@ elif page == "⚙️ Χρήστες":
         ):
             payload = {
                 "active": new_active,
-                "can_view_payments": (
-                    True
-                    if selected_user.get("role") == "admin"
-                    else new_payment_access
+                "can_view_payments": bool(
+                    new_payment_access
                 ),
             }
 
