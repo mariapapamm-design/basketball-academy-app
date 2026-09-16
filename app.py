@@ -626,6 +626,15 @@ def require_login():
             unsafe_allow_html=True,
         )
 
+        st.info(
+            "🔒 Εσωτερική σελίδα προπονητών των Ταύρων Καλαμαριάς."
+        )
+        st.link_button(
+            "🌐 Επίσημη σελίδα ομάδας — bullsbc.gr",
+            "https://bullsbc.gr/",
+            use_container_width=True,
+        )
+
         if st.session_state.pop(
             "password_reset_done",
             False,
@@ -2091,6 +2100,14 @@ elif page == "👥 Παίκτες":
             else None
         )
 
+        current_athlete_card_date = (
+            pd.to_datetime(
+                selected.get("athlete_card_received_on")
+            ).date()
+            if selected.get("athlete_card_received_on")
+            else date.today()
+        )
+
         with st.form(
             f"edit_player_form_{selected['id']}"
         ):
@@ -2124,6 +2141,35 @@ elif page == "👥 Παίκτες":
                 "Μέγεθος φανέλας",
                 JERSEY_SIZES,
                 index=size_index,
+            )
+
+            st.markdown("#### Έγγραφα αθλητή")
+
+            edit_athlete_card = st.checkbox(
+                "Κάρτα Αθλητή",
+                value=bool(
+                    selected.get("athlete_card_received", False)
+                ),
+                help="Τσέκαρέ το όταν έχει παραδοθεί η Κάρτα Αθλητή.",
+            )
+
+            edit_athlete_card_date = st.date_input(
+                "Ημερομηνία που έφερε την Κάρτα Αθλητή",
+                value=current_athlete_card_date,
+                max_value=date.today(),
+                format="DD/MM/YYYY",
+                help=(
+                    "Η ημερομηνία αποθηκεύεται μόνο όταν "
+                    "είναι τσεκαρισμένη η Κάρτα Αθλητή."
+                ),
+            )
+
+            edit_health_card = st.checkbox(
+                "Κάρτα Υγείας",
+                value=bool(
+                    selected.get("health_card_received", False)
+                ),
+                help="Τσέκαρέ το όταν έχει παραδοθεί η Κάρτα Υγείας.",
             )
 
             if can_access_payments():
@@ -2232,6 +2278,17 @@ elif page == "👥 Παίκτες":
                                 or None
                             ),
                             "jersey_size": edit_size,
+                            "athlete_card_received": bool(
+                                edit_athlete_card
+                            ),
+                            "athlete_card_received_on": (
+                                str(edit_athlete_card_date)
+                                if edit_athlete_card
+                                else None
+                            ),
+                            "health_card_received": bool(
+                                edit_health_card
+                            ),
                             "photo_path": photo_path,
                             "notes": (
                                 edit_notes.strip()
@@ -2305,10 +2362,28 @@ elif page == "👥 Παίκτες":
                 unsafe_allow_html=True,
             )
 
-            if not players:
-                st.info("Δεν υπάρχουν παίκτες.")
+            st.markdown("### 🔎 Αναζήτηση σε όλους τους παίκτες")
 
-            else:
+            search_col, button_col = st.columns([5, 1.35])
+
+            with search_col:
+                player_search = st.text_input(
+                    "Όνομα ή νούμερο φανέλας",
+                    key="players_global_search",
+                    placeholder="π.χ. Παπαδόπουλος ή 23",
+                    label_visibility="collapsed",
+                )
+
+            with button_col:
+                st.button(
+                    "🔎 Αναζήτηση",
+                    key="players_search_button",
+                    use_container_width=True,
+                )
+
+            normalized_search = normalize_search_text(player_search)
+
+            def render_player_table(rows, key_prefix):
                 layout = [
                     0.45,
                     0.55,
@@ -2340,7 +2415,7 @@ elif page == "👥 Παίκτες":
 
                 st.divider()
 
-                for p in players:
+                for p in rows:
                     cols = st.columns(layout)
 
                     with cols[0]:
@@ -2370,7 +2445,10 @@ elif page == "👥 Παίκτες":
 
                         if c_edit.button(
                             "✏️ Edit",
-                            key=f"player_edit_btn_{p['id']}",
+                            key=(
+                                f"player_edit_{key_prefix}_"
+                                f"{p['id']}"
+                            ),
                             help="Edit παίκτη",
                             use_container_width=True,
                         ):
@@ -2379,13 +2457,102 @@ elif page == "👥 Παίκτες":
 
                         if c_delete.button(
                             "🗑️ Διαγραφή",
-                            key=f"player_delete_btn_{p['id']}",
+                            key=(
+                                f"player_delete_{key_prefix}_"
+                                f"{p['id']}"
+                            ),
                             help="Διαγραφή παίκτη",
                             use_container_width=True,
                         ):
                             player_delete_dialog(p)
 
                     st.divider()
+
+            if not players:
+                st.info("Δεν υπάρχουν παίκτες.")
+
+            elif normalized_search:
+                matches = []
+
+                for p in players:
+                    searchable = " ".join(
+                        [
+                            str(p.get("full_name") or ""),
+                            str(p.get("jersey_number") or ""),
+                            str(p.get("team") or ""),
+                        ]
+                    )
+
+                    if normalized_search in normalize_search_text(searchable):
+                        matches.append(p)
+
+                st.caption(
+                    f"Αποτελέσματα σε όλα τα τμήματα: {len(matches)}"
+                )
+
+                if not matches:
+                    st.info(
+                        "Δεν βρέθηκε παίκτης με αυτή την αναζήτηση."
+                    )
+                else:
+                    render_player_table(matches, "search")
+
+            else:
+                st.caption(
+                    "Οι παίκτες εμφανίζονται οργανωμένοι ανά τμήμα. "
+                    "Άνοιξε το τμήμα που θέλεις."
+                )
+
+                teams_with_players = []
+                known_teams = set(TEAMS)
+
+                for team_name in TEAMS:
+                    team_rows = [
+                        p for p in players
+                        if (
+                            p.get("team") or "Χωρίς τμήμα"
+                        ) == team_name
+                    ]
+
+                    if team_rows:
+                        teams_with_players.append(
+                            (team_name, team_rows)
+                        )
+
+                extra_teams = sorted(
+                    {
+                        p.get("team") or "Χωρίς τμήμα"
+                        for p in players
+                        if (
+                            p.get("team") or "Χωρίς τμήμα"
+                        ) not in known_teams
+                    }
+                )
+
+                for team_name in extra_teams:
+                    team_rows = [
+                        p for p in players
+                        if (
+                            p.get("team") or "Χωρίς τμήμα"
+                        ) == team_name
+                    ]
+
+                    teams_with_players.append(
+                        (team_name, team_rows)
+                    )
+
+                for team_index, (
+                    team_name,
+                    team_rows,
+                ) in enumerate(teams_with_players):
+                    with st.expander(
+                        f"🏀 {team_name} ({len(team_rows)})",
+                        expanded=(team_index == 0),
+                    ):
+                        render_player_table(
+                            team_rows,
+                            f"team_{team_index}",
+                        )
 
         with tab_new:
             with st.form("new_player"):
@@ -2428,6 +2595,31 @@ elif page == "👥 Παίκτες":
                         "Μέγεθος φανέλας",
                         JERSEY_SIZES,
                     )
+                )
+
+                st.markdown("#### Έγγραφα αθλητή")
+
+                athlete_card_received = st.checkbox(
+                    "Κάρτα Αθλητή",
+                    value=False,
+                    help="Τσέκαρέ το όταν έχει παραδοθεί η Κάρτα Αθλητή.",
+                )
+
+                athlete_card_received_on = st.date_input(
+                    "Ημερομηνία που έφερε την Κάρτα Αθλητή",
+                    value=date.today(),
+                    max_value=date.today(),
+                    format="DD/MM/YYYY",
+                    help=(
+                        "Η ημερομηνία αποθηκεύεται μόνο όταν "
+                        "είναι τσεκαρισμένη η Κάρτα Αθλητή."
+                    ),
+                )
+
+                health_card_received = st.checkbox(
+                    "Κάρτα Υγείας",
+                    value=False,
+                    help="Τσέκαρέ το όταν έχει παραδοθεί η Κάρτα Υγείας.",
                 )
 
                 if can_access_payments():
@@ -2495,6 +2687,17 @@ elif page == "👥 Παίκτες":
                                 ),
                                 "jersey_size": (
                                     jersey_size
+                                ),
+                                "athlete_card_received": bool(
+                                    athlete_card_received
+                                ),
+                                "athlete_card_received_on": (
+                                    str(athlete_card_received_on)
+                                    if athlete_card_received
+                                    else None
+                                ),
+                                "health_card_received": bool(
+                                    health_card_received
                                 ),
                                 "notes": (
                                     notes.strip()
