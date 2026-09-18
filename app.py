@@ -544,12 +544,26 @@ def clear_auth_cookie():
 
 
 def auth_cookie_refresh_token():
+    # Διαβάζουμε πρώτα μέσω του CookieManager, γιατί αυτός είναι
+    # ο ίδιος μηχανισμός που γράφει το cookie στον browser.
+    # Το st.context.cookies μένει ως fallback για νέο websocket/
+    # πλήρες browser refresh.
+    encrypted = None
+
     try:
-        encrypted = st.context.cookies.get(
+        encrypted = AUTH_COOKIE_MANAGER.get(
             AUTH_COOKIE_NAME
         )
     except Exception:
         encrypted = None
+
+    if not encrypted:
+        try:
+            encrypted = st.context.cookies.get(
+                AUTH_COOKIE_NAME
+            )
+        except Exception:
+            encrypted = None
 
     return _decrypt_refresh_token(encrypted)
 
@@ -775,15 +789,6 @@ def require_login():
     ):
         clear_auth_cookie()
 
-    pending_refresh_token = st.session_state.pop(
-        "_set_auth_cookie_pending",
-        None,
-    )
-    if pending_refresh_token:
-        persist_auth_cookie(
-            pending_refresh_token
-        )
-
     skip_cookie_restore = st.session_state.pop(
         "_skip_cookie_restore_once",
         False,
@@ -964,11 +969,21 @@ def require_login():
                     st.stop()
 
                 st.session_state.profile = profile
+
+                # Σημαντικό: γράφουμε το persistent cookie στην ίδια
+                # εκτέλεση που προκλήθηκε από το κουμπί "Σύνδεση".
+                # Το extra-streamlit-components είναι πιο αξιόπιστο
+                # όταν το set γίνεται απευθείας από user interaction,
+                # αντί να το αναβάλουμε για επόμενο st.rerun().
                 if getattr(response, "session", None):
-                    st.session_state[
-                        "_set_auth_cookie_pending"
-                    ] = response.session.refresh_token
-                st.rerun()
+                    persist_auth_cookie(
+                        response.session.refresh_token
+                    )
+
+                # Δεν κάνουμε άμεσο st.rerun εδώ. Το CookieManager
+                # ολοκληρώνει πρώτα τη γραφή στον browser και το
+                # component προκαλεί το επόμενο rerun. Έτσι το cookie
+                # υπάρχει πραγματικά πριν από ένα μελλοντικό F5.
 
             except Exception:
                 st.error(
@@ -2307,13 +2322,20 @@ elif page == "👥 Παίκτες":
                 value=selected.get("full_name") or "",
             )
 
-            edit_birth_year = st.number_input(
+            edit_birth_year_options = list(
+                range(date.today().year, 1989, -1)
+            )
+            edit_birth_year = st.selectbox(
                 "Έτος Γέννησης",
-                min_value=1990,
-                max_value=date.today().year,
-                value=current_birth.year,
-                step=1,
-                format="%d",
+                edit_birth_year_options,
+                index=(
+                    edit_birth_year_options.index(
+                        current_birth.year
+                    )
+                    if current_birth.year
+                    in edit_birth_year_options
+                    else 0
+                ),
             )
             edit_birth = date(
                 int(edit_birth_year),
@@ -2761,13 +2783,17 @@ elif page == "👥 Παίκτες":
                     "Ονοματεπώνυμο *"
                 )
 
-                birth_year = st.number_input(
+                birth_year_options = list(
+                    range(date.today().year, 1989, -1)
+                )
+                birth_year = st.selectbox(
                     "Έτος Γέννησης",
-                    min_value=1990,
-                    max_value=date.today().year,
-                    value=2012,
-                    step=1,
-                    format="%d",
+                    birth_year_options,
+                    index=(
+                        birth_year_options.index(2012)
+                        if 2012 in birth_year_options
+                        else 0
+                    ),
                 )
                 birth_date = date(
                     int(birth_year),
