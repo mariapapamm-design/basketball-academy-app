@@ -13,7 +13,7 @@ from supabase import create_client
 
 APP_NAME = "Ταυροι Καλαμαριας Coaches 🏀"
 PASSWORD_RESET_REDIRECT_URL = (
-    "https://basketball-academy-kalamaria.streamlit.app/"
+    "https://tavroikalamarias.gr/"
 )
 PHOTO_BUCKET = "player-photos"
 
