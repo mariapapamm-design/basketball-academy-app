@@ -3,19 +3,25 @@ import uuid
 import calendar
 import html
 import unicodedata
+import base64
+import hashlib
 import streamlit as st
 import pandas as pd
+import extra_streamlit_components as stx
 
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from dateutil.relativedelta import relativedelta
 from supabase import create_client
+from cryptography.fernet import Fernet, InvalidToken
 
 APP_NAME = "Ταυροι Καλαμαριας Coaches 🏀"
 PASSWORD_RESET_REDIRECT_URL = (
     "https://tavroikalamarias.gr/"
 )
 PHOTO_BUCKET = "player-photos"
+AUTH_COOKIE_NAME = "tavroi_session"
+AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 
 TEAMS = [
     "Παμπαίδων Α’",
@@ -32,7 +38,7 @@ TEAMS = [
 ]
 
 JERSEY_SIZES = [
-    "6", "8", "10", "12", "14", "16",
+    "-", "6", "8", "10", "12", "14", "16",
     "XS", "S", "M", "L", "XL", "XXL",
 ]
 
@@ -360,6 +366,11 @@ def apply_club_theme():
 apply_club_theme()
 
 
+AUTH_COOKIE_MANAGER = stx.CookieManager(
+    key="tavroi_auth_cookie_manager"
+)
+
+
 # ============================================================
 # ΒΑΣΙΚΑ HELPERS
 # ============================================================
@@ -391,6 +402,15 @@ def format_date(value):
         return "—"
     try:
         return pd.to_datetime(value).strftime("%d/%m/%Y")
+    except Exception:
+        return str(value)
+
+
+def format_birth_year(value):
+    if not value:
+        return "—"
+    try:
+        return str(pd.to_datetime(value).year)
     except Exception:
         return str(value)
 
@@ -466,11 +486,140 @@ def get_user_client():
     return st.session_state.sb
 
 
+def _auth_fernet():
+    digest = hashlib.sha256(
+        SUPABASE_SECRET_KEY.encode("utf-8")
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _encrypt_refresh_token(refresh_token):
+    return _auth_fernet().encrypt(
+        refresh_token.encode("utf-8")
+    ).decode("utf-8")
+
+
+def _decrypt_refresh_token(value):
+    if not value:
+        return None
+    try:
+        return _auth_fernet().decrypt(
+            str(value).encode("utf-8")
+        ).decode("utf-8")
+    except (InvalidToken, ValueError, TypeError):
+        return None
+
+
+def persist_auth_cookie(refresh_token):
+    if not refresh_token:
+        return
+    try:
+        AUTH_COOKIE_MANAGER.set(
+            AUTH_COOKIE_NAME,
+            _encrypt_refresh_token(refresh_token),
+            key="set_tavroi_auth_cookie",
+            path="/",
+            expires_at=(datetime.now() + timedelta(days=7)),
+            max_age=AUTH_COOKIE_MAX_AGE,
+            secure=True,
+            same_site="lax",
+        )
+    except Exception:
+        pass
+
+
+def clear_auth_cookie():
+    try:
+        AUTH_COOKIE_MANAGER.set(
+            AUTH_COOKIE_NAME,
+            "",
+            key="clear_tavroi_auth_cookie",
+            path="/",
+            expires_at=(datetime.now() - timedelta(days=1)),
+            secure=True,
+            same_site="lax",
+        )
+    except Exception:
+        pass
+
+
+def auth_cookie_refresh_token():
+    try:
+        encrypted = st.context.cookies.get(
+            AUTH_COOKIE_NAME
+        )
+    except Exception:
+        encrypted = None
+
+    return _decrypt_refresh_token(encrypted)
+
+
+def restore_login_from_cookie():
+    if "user" in st.session_state:
+        return True
+
+    refresh_token = auth_cookie_refresh_token()
+    if not refresh_token:
+        return False
+
+    try:
+        sb = public_client()
+        response = sb.auth.refresh_session(
+            refresh_token
+        )
+        session = getattr(response, "session", None)
+        user = getattr(response, "user", None)
+
+        if user is None and session is not None:
+            user = getattr(session, "user", None)
+
+        if session is None or user is None:
+            raise RuntimeError("Session restore failed")
+
+        st.session_state.sb = sb
+        st.session_state.user = user
+
+        profile = load_profile(user.id)
+        if (
+            not profile
+            or not profile.get("active", False)
+        ):
+            try:
+                sb.auth.sign_out()
+            except Exception:
+                pass
+            clear_auth_cookie()
+            st.session_state.pop("sb", None)
+            st.session_state.pop("user", None)
+            st.session_state.pop("profile", None)
+            return False
+
+        st.session_state.profile = profile
+        persist_auth_cookie(
+            getattr(session, "refresh_token", None)
+        )
+        return True
+
+    except Exception:
+        clear_auth_cookie()
+        st.session_state.pop("sb", None)
+        st.session_state.pop("user", None)
+        st.session_state.pop("profile", None)
+        return False
+
+
 def logout():
     try:
         get_user_client().auth.sign_out()
     except Exception:
         pass
+
+    st.session_state[
+        "_clear_auth_cookie_pending"
+    ] = True
+    st.session_state[
+        "_skip_cookie_restore_once"
+    ] = True
 
     for key in ["sb", "user", "profile"]:
         st.session_state.pop(key, None)
@@ -595,6 +744,12 @@ def require_login():
                     except Exception:
                         pass
 
+                    st.session_state[
+                        "_clear_auth_cookie_pending"
+                    ] = True
+                    st.session_state[
+                        "_skip_cookie_restore_once"
+                    ] = True
                     clear_recovery_state()
                     st.query_params.clear()
                     st.session_state[
@@ -610,6 +765,38 @@ def require_login():
                     )
 
         st.stop()
+
+    # --------------------------------------------------------
+    # PENDING COOKIE ACTIONS
+    # --------------------------------------------------------
+    if st.session_state.pop(
+        "_clear_auth_cookie_pending",
+        False,
+    ):
+        clear_auth_cookie()
+
+    pending_refresh_token = st.session_state.pop(
+        "_set_auth_cookie_pending",
+        None,
+    )
+    if pending_refresh_token:
+        persist_auth_cookie(
+            pending_refresh_token
+        )
+
+    skip_cookie_restore = st.session_state.pop(
+        "_skip_cookie_restore_once",
+        False,
+    )
+
+    # --------------------------------------------------------
+    # RESTORE LOGIN AFTER BROWSER REFRESH
+    # --------------------------------------------------------
+    if (
+        "user" not in st.session_state
+        and not skip_cookie_restore
+    ):
+        restore_login_from_cookie()
 
     # --------------------------------------------------------
     # NORMAL LOGIN / FORGOT PASSWORD
@@ -777,6 +964,10 @@ def require_login():
                     st.stop()
 
                 st.session_state.profile = profile
+                if getattr(response, "session", None):
+                    st.session_state[
+                        "_set_auth_cookie_pending"
+                    ] = response.session.refresh_token
                 st.rerun()
 
             except Exception:
@@ -1109,7 +1300,7 @@ def training_status_label(start_dt, end_dt, now):
 def player_short_name(player):
     number = (player.get("jersey_number") or "").strip()
     if number:
-        return f"#{number} {player.get('full_name')}"
+        return f"#{number}  {player.get('full_name')}"
     return player.get("full_name")
 
 
@@ -2116,12 +2307,18 @@ elif page == "👥 Παίκτες":
                 value=selected.get("full_name") or "",
             )
 
-            edit_birth = st.date_input(
-                "Ημερομηνία Γέννησης",
-                value=current_birth,
-                min_value=date(1990, 1, 1),
-                max_value=date.today(),
-                format="DD/MM/YYYY",
+            edit_birth_year = st.number_input(
+                "Έτος Γέννησης",
+                min_value=1990,
+                max_value=date.today().year,
+                value=current_birth.year,
+                step=1,
+                format="%d",
+            )
+            edit_birth = date(
+                int(edit_birth_year),
+                1,
+                1,
             )
 
             edit_team = st.selectbox(
@@ -2227,7 +2424,7 @@ elif page == "👥 Παίκτες":
             ):
                 st.error(
                     "Υπάρχει ήδη παίκτης με το ίδιο "
-                    "όνομα και ημερομηνία γέννησης."
+                    "όνομα και έτος γέννησης."
                 )
 
             else:
@@ -2277,7 +2474,11 @@ elif page == "👥 Παίκτες":
                                 edit_number.strip()
                                 or None
                             ),
-                            "jersey_size": edit_size,
+                            "jersey_size": (
+                                None
+                                if edit_size == "-"
+                                else edit_size
+                            ),
                             "athlete_card_received": bool(
                                 edit_athlete_card
                             ),
@@ -2400,7 +2601,7 @@ elif page == "👥 Παίκτες":
                     "Φωτο",
                     "Νο",
                     "Ονοματεπώνυμο",
-                    "Ημ. Γέννησης",
+                    "Έτος Γέννησης",
                     "Τμήμα",
                     "Μέγεθος",
                     "Active",
@@ -2424,7 +2625,7 @@ elif page == "👥 Παίκτες":
                     values = [
                         p.get("jersey_number") or "—",
                         p.get("full_name") or "—",
-                        format_date(p.get("birth_date")),
+                        format_birth_year(p.get("birth_date")),
                         p.get("team") or "—",
                         p.get("jersey_size") or "—",
                         "✅" if p.get("active", True) else "—",
@@ -2560,20 +2761,18 @@ elif page == "👥 Παίκτες":
                     "Ονοματεπώνυμο *"
                 )
 
-                birth_date = st.date_input(
-                    "Ημερομηνία Γέννησης",
-                    value=date(
-                        2012,
-                        1,
-                        1,
-                    ),
-                    min_value=date(
-                        1990,
-                        1,
-                        1,
-                    ),
-                    max_value=date.today(),
-                    format="DD/MM/YYYY",
+                birth_year = st.number_input(
+                    "Έτος Γέννησης",
+                    min_value=1990,
+                    max_value=date.today().year,
+                    value=2012,
+                    step=1,
+                    format="%d",
+                )
+                birth_date = date(
+                    int(birth_year),
+                    1,
+                    1,
                 )
 
                 team = st.selectbox(
@@ -2666,7 +2865,7 @@ elif page == "👥 Παίκτες":
                     st.error(
                         "Υπάρχει ήδη παίκτης "
                         "με το ίδιο όνομα και "
-                        "ημερομηνία γέννησης."
+                        "έτος γέννησης."
                     )
 
                 else:
@@ -2686,7 +2885,9 @@ elif page == "👥 Παίκτες":
                                     or None
                                 ),
                                 "jersey_size": (
-                                    jersey_size
+                                    None
+                                    if jersey_size == "-"
+                                    else jersey_size
                                 ),
                                 "athlete_card_received": bool(
                                     athlete_card_received
