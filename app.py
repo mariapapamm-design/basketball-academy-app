@@ -510,116 +510,164 @@ def _decrypt_refresh_token(value):
         return None
 
 
-def persist_auth_cookie(refresh_token):
+def queue_auth_cookie(refresh_token):
+    """Keep the last Supabase refresh token until the browser confirms saving it."""
     if not refresh_token:
         return
-    try:
-        AUTH_COOKIE_MANAGER.set(
-            AUTH_COOKIE_NAME,
-            _encrypt_refresh_token(refresh_token),
-            key="set_tavroi_auth_cookie",
-            path="/",
-            expires_at=(datetime.now() + timedelta(days=7)),
-            max_age=AUTH_COOKIE_MAX_AGE,
-            secure=True,
-            same_site="lax",
+    if refresh_token == st.session_state.get("_auth_cookie_saved_token"):
+        return
+    if refresh_token != st.session_state.get("_auth_cookie_queued_token"):
+        # Fernet generates a new ciphertext each time: generate only once
+        # so the component sees stable arguments across its asynchronous rerun.
+        st.session_state["_auth_cookie_queued_token"] = refresh_token
+        st.session_state["_auth_cookie_queued_value"] = (
+            _encrypt_refresh_token(refresh_token)
         )
-    except Exception:
-        pass
+        st.session_state["_auth_cookie_write_key"] = (
+            "tavroi_auth_cookie_save_" + uuid.uuid4().hex
+        )
+    st.session_state["_set_auth_cookie_pending"] = True
+
+
+def persist_auth_cookie():
+    """Return True only after the browser component acknowledges its write."""
+    if not st.session_state.get("_set_auth_cookie_pending"):
+        return True
+    payload = st.session_state.get("_auth_cookie_queued_value")
+    if not payload:
+        return False
+    expires = st.session_state.setdefault(
+        "_auth_cookie_write_expiry",
+        (datetime.now() + timedelta(days=7)).isoformat(),
+    )
+    # Use the component's return value; CookieManager.set() discards it.
+    written = AUTH_COOKIE_MANAGER.cookie_manager(
+        method="set",
+        cookie=AUTH_COOKIE_NAME,
+        value=payload,
+        options={
+            "path": "/",
+            "expires": expires,
+            "maxAge": AUTH_COOKIE_MAX_AGE,
+            "secure": True,
+            "sameSite": "lax",
+        },
+        key=st.session_state["_auth_cookie_write_key"],
+        default=None,
+    )
+    if written is True:
+        st.session_state["_auth_cookie_saved_token"] = (
+            st.session_state.pop("_auth_cookie_queued_token")
+        )
+        for key in (
+            "_set_auth_cookie_pending", "_auth_cookie_queued_value",
+            "_auth_cookie_write_key", "_auth_cookie_write_expiry",
+        ):
+            st.session_state.pop(key, None)
+        return True
+    return False
 
 
 def clear_auth_cookie():
-    try:
-        AUTH_COOKIE_MANAGER.set(
-            AUTH_COOKIE_NAME,
-            "",
-            key="clear_tavroi_auth_cookie",
-            path="/",
-            expires_at=(datetime.now() - timedelta(days=1)),
-            secure=True,
-            same_site="lax",
-        )
-    except Exception:
-        pass
+    """Clear browser auth cookie and wait for the component to acknowledge."""
+    delete_key = st.session_state.setdefault(
+        "_auth_cookie_delete_key", "tavroi_auth_cookie_delete_" + uuid.uuid4().hex
+    )
+    result = AUTH_COOKIE_MANAGER.cookie_manager(
+        method="delete", cookie=AUTH_COOKIE_NAME,
+        key=delete_key, default=None,
+    )
+    if result is True:
+        for key in (
+            "_clear_auth_cookie_pending", "_auth_cookie_delete_key",
+            "_auth_cookie_saved_token", "_auth_cookie_queued_token",
+            "_auth_cookie_queued_value", "_auth_cookie_write_key",
+            "_auth_cookie_write_expiry", "_set_auth_cookie_pending",
+        ):
+            st.session_state.pop(key, None)
+        return True
+    return False
 
 
 def auth_cookie_refresh_token():
-    # Διαβάζουμε πρώτα μέσω του CookieManager, γιατί αυτός είναι
-    # ο ίδιος μηχανισμός που γράφει το cookie στον browser.
-    # Το st.context.cookies μένει ως fallback για νέο websocket/
-    # πλήρες browser refresh.
-    encrypted = None
-
+    """Return (token, ready). An empty first component render isn't a logout."""
     try:
-        encrypted = AUTH_COOKIE_MANAGER.get(
-            AUTH_COOKIE_NAME
-        )
+        encrypted = st.context.cookies.get(AUTH_COOKIE_NAME)
     except Exception:
         encrypted = None
+    if encrypted:
+        return _decrypt_refresh_token(encrypted), True
 
-    if not encrypted:
-        try:
-            encrypted = st.context.cookies.get(
-                AUTH_COOKIE_NAME
-            )
-        except Exception:
-            encrypted = None
-
-    return _decrypt_refresh_token(encrypted)
+    # The browser cookie component returns None *before* the iframe has
+    # read cookies. Do not show the login page while that read is pending.
+    browser_cookies = AUTH_COOKIE_MANAGER.cookie_manager(
+        method="getAll", key="tavroi_auth_cookie_browser_read", default=None,
+    )
+    if browser_cookies is None:
+        return None, False
+    if not isinstance(browser_cookies, dict):
+        return None, False
+    return _decrypt_refresh_token(browser_cookies.get(AUTH_COOKIE_NAME)), True
 
 
 def restore_login_from_cookie():
     if "user" in st.session_state:
         return True
 
-    refresh_token = auth_cookie_refresh_token()
+    refresh_token, ready = auth_cookie_refresh_token()
+    if not ready:
+        st.info("Ελέγχουμε τη σύνδεσή σου…")
+        st.stop()
     if not refresh_token:
         return False
 
     try:
         sb = public_client()
-        response = sb.auth.refresh_session(
-            refresh_token
-        )
+        response = sb.auth.refresh_session(refresh_token)
         session = getattr(response, "session", None)
         user = getattr(response, "user", None)
-
         if user is None and session is not None:
             user = getattr(session, "user", None)
-
         if session is None or user is None:
-            raise RuntimeError("Session restore failed")
+            raise RuntimeError("Invalid Refresh Token: session not found")
 
         st.session_state.sb = sb
         st.session_state.user = user
-
         profile = load_profile(user.id)
-        if (
-            not profile
-            or not profile.get("active", False)
-        ):
+        if not profile or not profile.get("active", False):
             try:
                 sb.auth.sign_out()
             except Exception:
                 pass
-            clear_auth_cookie()
-            st.session_state.pop("sb", None)
-            st.session_state.pop("user", None)
-            st.session_state.pop("profile", None)
+            st.session_state["_clear_auth_cookie_pending"] = True
+            st.session_state["_skip_cookie_restore_until_login"] = True
+            for key in ("sb", "user", "profile"):
+                st.session_state.pop(key, None)
             return False
 
         st.session_state.profile = profile
-        persist_auth_cookie(
-            getattr(session, "refresh_token", None)
-        )
+        queue_auth_cookie(getattr(session, "refresh_token", None))
         return True
-
-    except Exception:
-        clear_auth_cookie()
-        st.session_state.pop("sb", None)
-        st.session_state.pop("user", None)
-        st.session_state.pop("profile", None)
-        return False
+    except Exception as exc:
+        # Bad / revoked refresh tokens cannot restore a session. A network or
+        # Supabase outage should NOT silently destroy the browser session.
+        message = str(exc).lower()
+        revoked = any(fragment in message for fragment in (
+            "invalid refresh token", "refresh token not found",
+            "refresh token already used", "session not found",
+            "refresh_token_not_found",
+        ))
+        if revoked:
+            st.session_state["_clear_auth_cookie_pending"] = True
+            st.session_state["_skip_cookie_restore_until_login"] = True
+            for key in ("sb", "user", "profile"):
+                st.session_state.pop(key, None)
+            return False
+        st.warning(
+            "Η σύνδεση δεν επαληθεύτηκε προσωρινά. "
+            "Δοκίμασε ανανέωση σε λίγο — δεν έχει γίνει αποσύνδεση."
+        )
+        st.stop()
 
 
 def logout():
@@ -628,16 +676,10 @@ def logout():
     except Exception:
         pass
 
-    st.session_state[
-        "_clear_auth_cookie_pending"
-    ] = True
-    st.session_state[
-        "_skip_cookie_restore_once"
-    ] = True
-
-    for key in ["sb", "user", "profile"]:
+    st.session_state["_clear_auth_cookie_pending"] = True
+    st.session_state["_skip_cookie_restore_until_login"] = True
+    for key in ("sb", "user", "profile"):
         st.session_state.pop(key, None)
-
     st.rerun()
 
 
@@ -762,7 +804,7 @@ def require_login():
                         "_clear_auth_cookie_pending"
                     ] = True
                     st.session_state[
-                        "_skip_cookie_restore_once"
+                        "_skip_cookie_restore_until_login"
                     ] = True
                     clear_recovery_state()
                     st.query_params.clear()
@@ -781,27 +823,22 @@ def require_login():
         st.stop()
 
     # --------------------------------------------------------
-    # PENDING COOKIE ACTIONS
+    # COOKIE ACTIONS: wait for the browser, don't expose Login mid-refresh.
     # --------------------------------------------------------
-    if st.session_state.pop(
-        "_clear_auth_cookie_pending",
-        False,
-    ):
-        clear_auth_cookie()
+    if st.session_state.get("_clear_auth_cookie_pending"):
+        if not clear_auth_cookie():
+            st.info("Ολοκλήρωση αποσύνδεσης…")
+            st.stop()
 
-    skip_cookie_restore = st.session_state.pop(
-        "_skip_cookie_restore_once",
-        False,
-    )
-
-    # --------------------------------------------------------
-    # RESTORE LOGIN AFTER BROWSER REFRESH
-    # --------------------------------------------------------
-    if (
-        "user" not in st.session_state
-        and not skip_cookie_restore
-    ):
+    if ("user" not in st.session_state
+            and not st.session_state.get("_skip_cookie_restore_until_login")):
         restore_login_from_cookie()
+
+    # Login and token refresh queue a write. Allow the browser to finish it
+    # before the user navigates away and loses the rotated Supabase token.
+    if not persist_auth_cookie():
+        st.info("Διατήρηση της σύνδεσής σου…")
+        st.stop()
 
     # --------------------------------------------------------
     # NORMAL LOGIN / FORGOT PASSWORD
@@ -969,21 +1006,10 @@ def require_login():
                     st.stop()
 
                 st.session_state.profile = profile
-
-                # Σημαντικό: γράφουμε το persistent cookie στην ίδια
-                # εκτέλεση που προκλήθηκε από το κουμπί "Σύνδεση".
-                # Το extra-streamlit-components είναι πιο αξιόπιστο
-                # όταν το set γίνεται απευθείας από user interaction,
-                # αντί να το αναβάλουμε για επόμενο st.rerun().
+                st.session_state.pop("_skip_cookie_restore_until_login", None)
                 if getattr(response, "session", None):
-                    persist_auth_cookie(
-                        response.session.refresh_token
-                    )
-
-                # Δεν κάνουμε άμεσο st.rerun εδώ. Το CookieManager
-                # ολοκληρώνει πρώτα τη γραφή στον browser και το
-                # component προκαλεί το επόμενο rerun. Έτσι το cookie
-                # υπάρχει πραγματικά πριν από ένα μελλοντικό F5.
+                    queue_auth_cookie(response.session.refresh_token)
+                st.rerun()
 
             except Exception:
                 st.error(
@@ -1008,6 +1034,18 @@ def require_login():
         logout()
 
     st.session_state.profile = profile
+
+    # Supabase may rotate its refresh token during an existing user session.
+    # Keep the browser copy in sync to avoid a stale token on the next F5.
+    try:
+        current_session = get_user_client().auth.get_session()
+        if current_session:
+            queue_auth_cookie(getattr(current_session, "refresh_token", None))
+    except Exception:
+        pass  # A temporary auth-service hiccup does not log a user out.
+    if not persist_auth_cookie():
+        st.info("Ενημέρωση της σύνδεσής σου…")
+        st.stop()
 
 
 def role_is_admin():
@@ -2322,20 +2360,13 @@ elif page == "👥 Παίκτες":
                 value=selected.get("full_name") or "",
             )
 
-            edit_birth_year_options = list(
-                range(date.today().year, 1989, -1)
-            )
-            edit_birth_year = st.selectbox(
+            edit_birth_year = st.number_input(
                 "Έτος Γέννησης",
-                edit_birth_year_options,
-                index=(
-                    edit_birth_year_options.index(
-                        current_birth.year
-                    )
-                    if current_birth.year
-                    in edit_birth_year_options
-                    else 0
-                ),
+                min_value=1990,
+                max_value=date.today().year,
+                value=current_birth.year,
+                step=1,
+                format="%d",
             )
             edit_birth = date(
                 int(edit_birth_year),
@@ -2783,17 +2814,13 @@ elif page == "👥 Παίκτες":
                     "Ονοματεπώνυμο *"
                 )
 
-                birth_year_options = list(
-                    range(date.today().year, 1989, -1)
-                )
-                birth_year = st.selectbox(
+                birth_year = st.number_input(
                     "Έτος Γέννησης",
-                    birth_year_options,
-                    index=(
-                        birth_year_options.index(2012)
-                        if 2012 in birth_year_options
-                        else 0
-                    ),
+                    min_value=1990,
+                    max_value=date.today().year,
+                    value=2012,
+                    step=1,
+                    format="%d",
                 )
                 birth_date = date(
                     int(birth_year),
@@ -3079,23 +3106,18 @@ elif page == "✅ Παρουσίες":
 
         st.caption(f"{len(team_players)} παίκτες")
 
-        with st.form("attendance_form"):
+        # A single checkbox with the player name as its label avoids
+        # st.columns stacking on mobile (photo / name / checkbox separately).
+        with st.form("attendance_form", border=False):
             presence = {}
 
             for p in team_players:
-                row = st.columns([0.7, 4.3, 1.4])
-
-                with row[0]:
-                    show_player_photo(p, width=44)
-
-                row[1].markdown(f"**{player_short_name(p)}**")
-
-                with row[2]:
-                    presence[p["id"]] = st.checkbox(
-                        "Παρών",
-                        value=True,
-                        key=f"attendance_{training_date}_{p['id']}",
-                    )
+                presence[p["id"]] = st.checkbox(
+                    player_short_name(p),
+                    value=True,
+                    key=f"attendance_{training_date}_{p['id']}",
+                    help="Παρόν / Απών",
+                )
 
             submit_att = st.form_submit_button(
                 "Αποθήκευση παρουσιών",
