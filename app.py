@@ -1403,6 +1403,77 @@ def get_team_attendance(team):
     return rows
 
 
+
+def save_attendance_status(player_id, training_date, present):
+    """Save ONLY one player/day. Never rewrite teammates' attendance."""
+    client = get_user_client()
+    existing = (
+        client.table("attendance")
+        .select("id")
+        .eq("player_id", player_id)
+        .eq("training_date", str(training_date))
+        .limit(2)
+        .execute()
+        .data or []
+    )
+    if len(existing) > 1:
+        raise ValueError("Βρέθηκαν διπλές εγγραφές παρουσίας για τον παίκτη/ημέρα.")
+    payload = {
+        "present": bool(present),
+        "recorded_by": st.session_state.user.id,
+    }
+    if existing:
+        client.table("attendance").update(payload).eq("id", existing[0]["id"]).execute()
+    else:
+        client.table("attendance").insert({
+            "player_id": player_id,
+            "training_date": str(training_date),
+            **payload,
+        }).execute()
+
+
+def render_single_attendance_editor(team_players, training_date, date_rows, prefix):
+    """Independent late-arrival / day-correction form, affects one player only."""
+    if not team_players:
+        return
+    by_id = {p["id"]: p for p in team_players}
+    selected_id = st.selectbox(
+        "Επιλογή παίκτη",
+        options=list(by_id),
+        format_func=lambda pid: player_short_name(by_id[pid]),
+        key=f"single_att_player_{prefix}_{training_date}",
+    )
+    existing = date_rows.get(selected_id)
+    st.caption(
+        "Τώρα: " + (
+            "✅ Παρών" if existing and existing["present"] is True
+            else "❌ Απών" if existing and existing["present"] is False
+            else "— Δεν έχει καταχωρηθεί ακόμη"
+        )
+    )
+    with st.form(f"single_att_form_{prefix}_{training_date}_{selected_id}"):
+        selected_status = st.radio(
+            "Νέα κατάσταση",
+            ["✅ Παρών", "❌ Απών"],
+            index=0 if existing and existing["present"] is True else 1,
+            key=f"single_att_status_{prefix}_{training_date}_{selected_id}",
+            horizontal=True,
+        )
+        submit_one = st.form_submit_button(
+            "Αποθήκευση μόνο αυτού του παίκτη", use_container_width=True
+        )
+    if submit_one:
+        try:
+            save_attendance_status(
+                selected_id, training_date, selected_status == "✅ Παρών"
+            )
+        except Exception as exc:
+            st.error(f"Δεν αποθηκεύτηκε η αλλαγή: {exc}")
+        else:
+            set_flash("✅ Ενημερώθηκε μόνο ο επιλεγμένος παίκτης.")
+            st.rerun()
+
+
 def attendance_matrix(players, attendance_rows, start_date=None, end_date=None):
     filtered = []
 
@@ -3098,66 +3169,87 @@ elif page == "✅ Παρουσίες":
     # ---------------- Καταχώρηση ----------------
     with tab_record:
         st.subheader(f"Καταχώρηση — {selected_team}")
-
         training_date = st.date_input(
             "Ημερομηνία προπόνησης",
             value=date.today(),
             format="DD/MM/YYYY",
             key="attendance_record_date",
         )
-
         st.caption(f"{len(team_players)} παίκτες")
+        date_rows = {
+            r["player_id"]: r
+            for r in attendance_rows
+            if str(r.get("training_date")) == str(training_date)
+        }
+        is_new_day = not date_rows
 
-        # A single checkbox with the player name as its label avoids
-        # st.columns stacking on mobile (photo / name / checkbox separately).
-        with st.form("attendance_form", border=False):
+        if is_new_day:
+            st.info(
+                "Νέα προπόνηση: αρχικά όλοι είναι ❌ Απόντες. "
+                "Τσέκαρε ΜΟΝΟ όσους είναι πράγματι παρόντες. "
+                "Με την αποθήκευση θα καταχωρηθούν και οι απόντες με ❌."
+            )
+        else:
+            st.info(
+                "Η ημέρα έχει ήδη καταχωρηθεί. Τα τσεκ δείχνουν τις αποθηκευμένες "
+                "παρουσίες. Για αλλαγές, ξετσέκαρε/τσέκαρε τον παίκτη και "
+                "πάτησε Αποθήκευση. Θα ενημερωθούν μόνο όσοι άλλαξαν."
+            )
+
+        # Checkboxes are never pre-checked for a NEW training day.
+        # Keeping the player's name as the checkbox label also works on mobile.
+        with st.form(f"attendance_form_{selected_team}_{training_date}", border=False):
             presence = {}
-
             for p in team_players:
+                current = date_rows.get(p["id"])
+                initial_value = bool(current["present"]) if current else False
                 presence[p["id"]] = st.checkbox(
                     player_short_name(p),
-                    value=True,
-                    key=f"attendance_{training_date}_{p['id']}",
-                    help="Παρόν / Απών",
+                    value=initial_value,
+                    key=f"attendance_v3_{selected_team}_{training_date}_{p['id']}",
+                    help="Τσεκαρισμένο = ✅ Παρών · Χωρίς τσεκ = ❌ Απών",
                 )
-
             submit_att = st.form_submit_button(
-                "Αποθήκευση παρουσιών",
+                "Αποθήκευση παρουσιών" if is_new_day else "Αποθήκευση αλλαγών ημέρας",
                 use_container_width=True,
             )
 
         if submit_att:
-            for p in team_players:
-                existing = (
-                    sb.table("attendance")
-                    .select("id")
-                    .eq("player_id", p["id"])
-                    .eq("training_date", str(training_date))
-                    .execute()
-                    .data
+            try:
+                changes = 0
+                for p in team_players:
+                    previous = date_rows.get(p["id"])
+                    new_status = bool(presence[p["id"]])
+                    # On first save, record everybody, including absent players.
+                    # On subsequent saves, NEVER rewrite other players' records.
+                    if is_new_day or (
+                        previous is not None
+                        and bool(previous["present"]) != new_status
+                    ) or (previous is None and new_status):
+                        save_attendance_status(p["id"], training_date, new_status)
+                        changes += 1
+            except Exception as exc:
+                st.error(
+                    "Η αποθήκευση δεν ολοκληρώθηκε για όλους. "
+                    "Ξαναφόρτωσε την ημέρα για να δεις ποιες αλλαγές αποθηκεύτηκαν "
+                    "και προσπάθησε ξανά. " + str(exc)
                 )
+            else:
+                set_flash(
+                    f"✅ Αποθηκεύτηκαν {changes} καταχωρήσεις/αλλαγές για "
+                    f"{training_date.strftime('%d/%m/%Y')}."
+                )
+                st.rerun()
 
-                payload = {
-                    "player_id": p["id"],
-                    "training_date": str(training_date),
-                    "present": bool(presence[p["id"]]),
-                    "recorded_by": st.session_state.user.id,
-                }
-
-                if existing:
-                    (
-                        sb.table("attendance")
-                        .update(payload)
-                        .eq("id", existing[0]["id"])
-                        .execute()
-                    )
-                else:
-                    sb.table("attendance").insert(payload).execute()
-
-            set_flash(
-                f"✅ Οι παρουσίες του {selected_team} για {training_date.strftime('%d/%m/%Y')} αποθηκεύτηκαν."
-            )
-            st.rerun()
+        st.divider()
+        st.markdown("#### ➕ Προσθήκη ή αλλαγή ενός μόνο παίκτη")
+        st.caption(
+            "Για παιδί που έφτασε αργότερα ή έφυγε: αλλάζεις ΜΟΝΟ τη δική του "
+            "παρουσία, χωρίς να ξανακαταχωρηθούν οι υπόλοιποι."
+        )
+        render_single_attendance_editor(
+            team_players, training_date, date_rows, "record"
+        )
 
     # ---------------- Ανά ημέρα ----------------
     with tab_day:
@@ -3167,25 +3259,21 @@ elif page == "✅ Παρουσίες":
             format="DD/MM/YYYY",
             key="attendance_day_view",
         )
-
         day_df, training_dates = attendance_matrix(
             view_players,
             attendance_rows,
             start_date=day,
             end_date=day,
         )
-
         if day_df.empty or not training_dates:
             st.info("Δεν υπάρχει καταχωρημένη προπόνηση για αυτή την ημερομηνία.")
         else:
             st.dataframe(day_df, use_container_width=True, hide_index=True)
-
             excel_data = excel_bytes_from_dataframe(
                 day_df,
                 sheet_name="Ημέρα",
                 title=f"{selected_team} — {day.strftime('%d/%m/%Y')}",
             )
-
             st.download_button(
                 "⬇️ Εξαγωγή σε Excel",
                 data=excel_data,
@@ -3193,6 +3281,21 @@ elif page == "✅ Παρουσίες":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
+        st.divider()
+        st.markdown("#### ✏️ Διόρθωση παρουσίας στην επιλεγμένη ημέρα")
+        st.caption(
+            "Διάλεξε έναν παίκτη και όρισε ✅ Παρών ή ❌ Απών. "
+            "Μόνο η συγκεκριμένη εγγραφή θα ενημερωθεί."
+        )
+        selected_date_rows = {
+            r["player_id"]: r
+            for r in attendance_rows
+            if str(r.get("training_date")) == str(day)
+        }
+        render_single_attendance_editor(
+            team_players, day, selected_date_rows, "day"
+        )
 
     # ---------------- Ανά εβδομάδα ----------------
     with tab_week:
