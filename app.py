@@ -873,69 +873,6 @@ def require_login():
                 "Μπορείς να συνδεθείς με τον νέο κωδικό."
             )
 
-        if st.session_state.get(
-            "show_forgot_password",
-            False,
-        ):
-            st.subheader("Ξέχασα τον κωδικό μου")
-
-            st.caption(
-                "Γράψε το email του λογαριασμού σου. "
-                "Θα λάβεις email για να ορίσεις νέο κωδικό."
-            )
-
-            with st.form("forgot_password_form"):
-                recovery_email = st.text_input(
-                    "Email",
-                    key="recovery_email",
-                )
-
-                send_recovery = st.form_submit_button(
-                    "Αποστολή email επαναφοράς",
-                    use_container_width=True,
-                )
-
-            if send_recovery:
-                if not recovery_email.strip():
-                    st.error("Συμπλήρωσε το email σου.")
-
-                else:
-                    try:
-                        public_client().auth.reset_password_for_email(
-                            recovery_email.strip().lower(),
-                            {
-                                "redirect_to": (
-                                    PASSWORD_RESET_REDIRECT_URL
-                                ),
-                            },
-                        )
-
-                        st.success(
-                            "✅ Αν το email αντιστοιχεί σε "
-                            "ενεργό λογαριασμό, στάλθηκε μήνυμα "
-                            "επαναφοράς. Έλεγξε και τα Spam."
-                        )
-
-                    except Exception:
-                        # Ίδιο μήνυμα ώστε να μη διαρρέουμε
-                        # αν ένα email υπάρχει ή όχι.
-                        st.success(
-                            "✅ Αν το email αντιστοιχεί σε "
-                            "ενεργό λογαριασμό, στάλθηκε μήνυμα "
-                            "επαναφοράς. Έλεγξε και τα Spam."
-                        )
-
-            if st.button(
-                "← Επιστροφή στη σύνδεση",
-                use_container_width=True,
-            ):
-                st.session_state[
-                    "show_forgot_password"
-                ] = False
-                st.rerun()
-
-            st.stop()
-
         with st.form("login_form"):
             email = st.text_input("Email")
             password = st.text_input(
@@ -946,15 +883,6 @@ def require_login():
                 "Σύνδεση",
                 use_container_width=True,
             )
-
-        if st.button(
-            "Ξέχασα τον κωδικό μου;",
-            use_container_width=True,
-        ):
-            st.session_state[
-                "show_forgot_password"
-            ] = True
-            st.rerun()
 
         if submitted:
             try:
@@ -1864,6 +1792,80 @@ def edit_user_dialog(user_id):
             "💾 Αποθήκευση αλλαγών",
             use_container_width=True,
         )
+
+    st.divider()
+    st.caption(
+        "🔐 Αλλαγή κωδικού: μόνο για διαχειριστές. "
+        "Ο τωρινός κωδικός δεν είναι διαθέσιμος για προβολή."
+    )
+    with st.form(f"change_password_{user_id}", clear_on_submit=True):
+        new_user_password = st.text_input(
+            "Νέος κωδικός",
+            type="password",
+            key=f"new_user_password_{user_id}",
+        )
+        confirm_user_password = st.text_input(
+            "Επιβεβαίωση νέου κωδικού",
+            type="password",
+            key=f"confirm_user_password_{user_id}",
+        )
+        change_user_password = st.form_submit_button(
+            "🔐 Αποθήκευση νέου κωδικού",
+            use_container_width=True,
+        )
+
+    if change_user_password:
+        if len(new_user_password) < 8:
+            st.error("Ο νέος κωδικός πρέπει να έχει τουλάχιστον 8 χαρακτήρες.")
+            return
+        if new_user_password != confirm_user_password:
+            st.error("Οι δύο κωδικοί δεν είναι ίδιοι.")
+            return
+        try:
+            # Check authentication AND current permissions on the server,
+            # not only the role cached in this Streamlit session.
+            verified_user = get_user_client().auth.get_user().user
+            current_admin_id = st.session_state.user.id
+            if not verified_user or str(verified_user.id) != str(current_admin_id):
+                st.error("Η σύνδεση έληξε. Συνδέσου ξανά ως διαχειρίστρια.")
+                return
+            current_admin = (
+                admin.table("profiles")
+                .select("role,active")
+                .eq("id", current_admin_id)
+                .maybe_single()
+                .execute()
+                .data
+            )
+            if not current_admin or current_admin.get("role") != "admin" or not current_admin.get("active"):
+                st.error("Δεν έχεις ενεργή διαχειριστική πρόσβαση.")
+                return
+            if str(user_id) == str(current_admin_id):
+                st.error("Δεν αλλάζεις τον δικό σου κωδικό από αυτή την οθόνη.")
+                return
+            target_exists = (
+                admin.table("profiles")
+                .select("id")
+                .eq("id", user_id)
+                .maybe_single()
+                .execute()
+                .data
+            )
+            if not target_exists:
+                st.error("Ο λογαριασμός δεν βρέθηκε.")
+                return
+            admin.auth.admin.update_user_by_id(
+                user_id, {"password": new_user_password}
+            )
+            st.success(
+                "✅ Ο κωδικός του χρήστη άλλαξε. "
+                "Ενημέρωσέ τον με ασφαλή τρόπο για τον νέο κωδικό."
+            )
+        except Exception:
+            st.error(
+                "Δεν ολοκληρώθηκε η αλλαγή κωδικού. "
+                "Έλεγξε τη σύνδεσή σου και δοκίμασε ξανά."
+            )
 
     if save_user:
         normalized_email = (
