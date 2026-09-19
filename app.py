@@ -1432,48 +1432,6 @@ def save_attendance_status(player_id, training_date, present):
         }).execute()
 
 
-def render_single_attendance_editor(team_players, training_date, date_rows, prefix):
-    """Independent late-arrival / day-correction form, affects one player only."""
-    if not team_players:
-        return
-    by_id = {p["id"]: p for p in team_players}
-    selected_id = st.selectbox(
-        "Επιλογή παίκτη",
-        options=list(by_id),
-        format_func=lambda pid: player_short_name(by_id[pid]),
-        key=f"single_att_player_{prefix}_{training_date}",
-    )
-    existing = date_rows.get(selected_id)
-    st.caption(
-        "Τώρα: " + (
-            "✅ Παρών" if existing and existing["present"] is True
-            else "❌ Απών" if existing and existing["present"] is False
-            else "— Δεν έχει καταχωρηθεί ακόμη"
-        )
-    )
-    with st.form(f"single_att_form_{prefix}_{training_date}_{selected_id}"):
-        selected_status = st.radio(
-            "Νέα κατάσταση",
-            ["✅ Παρών", "❌ Απών"],
-            index=0 if existing and existing["present"] is True else 1,
-            key=f"single_att_status_{prefix}_{training_date}_{selected_id}",
-            horizontal=True,
-        )
-        submit_one = st.form_submit_button(
-            "Αποθήκευση μόνο αυτού του παίκτη", use_container_width=True
-        )
-    if submit_one:
-        try:
-            save_attendance_status(
-                selected_id, training_date, selected_status == "✅ Παρών"
-            )
-        except Exception as exc:
-            st.error(f"Δεν αποθηκεύτηκε η αλλαγή: {exc}")
-        else:
-            set_flash("✅ Ενημερώθηκε μόνο ο επιλεγμένος παίκτης.")
-            st.rerun()
-
-
 def attendance_matrix(players, attendance_rows, start_date=None, end_date=None):
     filtered = []
 
@@ -3241,16 +3199,6 @@ elif page == "✅ Παρουσίες":
                 )
                 st.rerun()
 
-        st.divider()
-        st.markdown("#### ➕ Προσθήκη ή αλλαγή ενός μόνο παίκτη")
-        st.caption(
-            "Για παιδί που έφτασε αργότερα ή έφυγε: αλλάζεις ΜΟΝΟ τη δική του "
-            "παρουσία, χωρίς να ξανακαταχωρηθούν οι υπόλοιποι."
-        )
-        render_single_attendance_editor(
-            team_players, training_date, date_rows, "record"
-        )
-
     # ---------------- Ανά ημέρα ----------------
     with tab_day:
         day = st.date_input(
@@ -3281,21 +3229,6 @@ elif page == "✅ Παρουσίες":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-
-        st.divider()
-        st.markdown("#### ✏️ Διόρθωση παρουσίας στην επιλεγμένη ημέρα")
-        st.caption(
-            "Διάλεξε έναν παίκτη και όρισε ✅ Παρών ή ❌ Απών. "
-            "Μόνο η συγκεκριμένη εγγραφή θα ενημερωθεί."
-        )
-        selected_date_rows = {
-            r["player_id"]: r
-            for r in attendance_rows
-            if str(r.get("training_date")) == str(day)
-        }
-        render_single_attendance_editor(
-            team_players, day, selected_date_rows, "day"
-        )
 
     # ---------------- Ανά εβδομάδα ----------------
     with tab_week:
