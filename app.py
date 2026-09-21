@@ -1432,6 +1432,48 @@ def save_attendance_status(player_id, training_date, present):
         }).execute()
 
 
+def render_single_attendance_editor(team_players, training_date, date_rows, prefix):
+    """Independent late-arrival / day-correction form, affects one player only."""
+    if not team_players:
+        return
+    by_id = {p["id"]: p for p in team_players}
+    selected_id = st.selectbox(
+        "Επιλογή παίκτη",
+        options=list(by_id),
+        format_func=lambda pid: player_short_name(by_id[pid]),
+        key=f"single_att_player_{prefix}_{training_date}",
+    )
+    existing = date_rows.get(selected_id)
+    st.caption(
+        "Τώρα: " + (
+            "✅ Παρών" if existing and existing["present"] is True
+            else "❌ Απών" if existing and existing["present"] is False
+            else "— Δεν έχει καταχωρηθεί ακόμη"
+        )
+    )
+    with st.form(f"single_att_form_{prefix}_{training_date}_{selected_id}"):
+        selected_status = st.radio(
+            "Νέα κατάσταση",
+            ["✅ Παρών", "❌ Απών"],
+            index=0 if existing and existing["present"] is True else 1,
+            key=f"single_att_status_{prefix}_{training_date}_{selected_id}",
+            horizontal=True,
+        )
+        submit_one = st.form_submit_button(
+            "Αποθήκευση μόνο αυτού του παίκτη", use_container_width=True
+        )
+    if submit_one:
+        try:
+            save_attendance_status(
+                selected_id, training_date, selected_status == "✅ Παρών"
+            )
+        except Exception as exc:
+            st.error(f"Δεν αποθηκεύτηκε η αλλαγή: {exc}")
+        else:
+            set_flash("✅ Ενημερώθηκε μόνο ο επιλεγμένος παίκτης.")
+            st.rerun()
+
+
 def attendance_matrix(players, attendance_rows, start_date=None, end_date=None):
     filtered = []
 
@@ -2613,11 +2655,18 @@ elif page == "👥 Παίκτες":
     else:
         st.title("Παίκτες")
 
+        if st.session_state.pop("force_players_list", False):
+            st.session_state["players_tabs"] = "Λίστα παικτών"
+        elif "players_tabs" not in st.session_state:
+            st.session_state["players_tabs"] = "Λίστα παικτών"
+
         tab_list, tab_new = st.tabs(
             [
                 "Λίστα παικτών",
                 "➕ Νέος παίκτης",
-            ]
+            ],
+            key="players_tabs",
+            on_change="rerun",
         )
 
         with tab_list:
@@ -2832,7 +2881,7 @@ elif page == "👥 Παίκτες":
                 ) in enumerate(teams_with_players):
                     with st.expander(
                         f"🏀 {team_name} ({len(team_rows)})",
-                        expanded=(team_index == 0),
+                        expanded=False,
                     ):
                         render_player_table(
                             team_rows,
@@ -3055,12 +3104,18 @@ elif page == "👥 Παίκτες":
                                 "δεν ανέβηκε.",
                                 "warning",
                             )
+                            st.session_state[
+                                "force_players_list"
+                            ] = True
                             st.rerun()
 
                     set_flash(
                         "✅ Ο παίκτης "
                         "αποθηκεύτηκε."
                     )
+                    st.session_state[
+                        "force_players_list"
+                    ] = True
                     st.rerun()
 
 
@@ -3199,6 +3254,16 @@ elif page == "✅ Παρουσίες":
                 )
                 st.rerun()
 
+        st.divider()
+        st.markdown("#### ➕ Προσθήκη ή αλλαγή ενός μόνο παίκτη")
+        st.caption(
+            "Για παιδί που έφτασε αργότερα ή έφυγε: αλλάζεις ΜΟΝΟ τη δική του "
+            "παρουσία, χωρίς να ξανακαταχωρηθούν οι υπόλοιποι."
+        )
+        render_single_attendance_editor(
+            team_players, training_date, date_rows, "record"
+        )
+
     # ---------------- Ανά ημέρα ----------------
     with tab_day:
         day = st.date_input(
@@ -3229,6 +3294,21 @@ elif page == "✅ Παρουσίες":
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
+        st.divider()
+        st.markdown("#### ✏️ Διόρθωση παρουσίας στην επιλεγμένη ημέρα")
+        st.caption(
+            "Διάλεξε έναν παίκτη και όρισε ✅ Παρών ή ❌ Απών. "
+            "Μόνο η συγκεκριμένη εγγραφή θα ενημερωθεί."
+        )
+        selected_date_rows = {
+            r["player_id"]: r
+            for r in attendance_rows
+            if str(r.get("training_date")) == str(day)
+        }
+        render_single_attendance_editor(
+            team_players, day, selected_date_rows, "day"
+        )
 
     # ---------------- Ανά εβδομάδα ----------------
     with tab_week:
@@ -3859,16 +3939,9 @@ elif page == "💳 Πληρωμές":
 
     # ---------------- Κατάσταση ----------------
     with tab_status:
-        selected_team = st.selectbox(
-            "Τμήμα",
-            payment_teams,
-            key="payments_status_team",
+        st.caption(
+            "Η αναζήτηση γίνεται σε όλα τα τμήματα και σε όλους τους παίκτες."
         )
-
-        team_players = [
-            p for p in players
-            if p.get("team") == selected_team
-        ]
 
         status_search = st.text_input(
             "🔎 Αναζήτηση παίκτη",
@@ -3883,7 +3956,7 @@ elif page == "💳 Πληρωμές":
 
         if search_term:
             displayed_players = [
-                p for p in team_players
+                p for p in players
                 if (
                     search_term
                     in normalize_search_text(
@@ -3896,7 +3969,7 @@ elif page == "💳 Πληρωμές":
                 )
             ]
         else:
-            displayed_players = team_players
+            displayed_players = players
 
         if search_term and not displayed_players:
             st.info(
@@ -4001,11 +4074,20 @@ elif page == "💳 Πληρωμές":
 
             with cols[7]:
                 e1, e2 = st.columns([1, 1.35])
+                has_player_payments = any(
+                    r.get("player_id") == p["id"]
+                    for r in payment_rows
+                )
 
                 if e1.button(
                     "✏️ Edit",
                     key=f"pay_manage_edit_{p['id']}",
-                    help="Edit πληρωμής",
+                    help=(
+                        "Edit πληρωμής"
+                        if has_player_payments
+                        else "Δεν υπάρχει πληρωμή για επεξεργασία"
+                    ),
+                    disabled=not has_player_payments,
                     use_container_width=True,
                 ):
                     st.session_state[
@@ -4014,11 +4096,17 @@ elif page == "💳 Πληρωμές":
                     st.session_state[
                         "payment_manage_mode"
                     ] = "edit"
+                    st.rerun()
 
                 if e2.button(
                     "🗑️ Διαγραφή",
                     key=f"pay_manage_delete_{p['id']}",
-                    help="Διαγραφή πληρωμής",
+                    help=(
+                        "Διαγραφή πληρωμής"
+                        if has_player_payments
+                        else "Δεν υπάρχει πληρωμή για διαγραφή"
+                    ),
+                    disabled=not has_player_payments,
                     use_container_width=True,
                 ):
                     st.session_state[
@@ -4027,6 +4115,7 @@ elif page == "💳 Πληρωμές":
                     st.session_state[
                         "payment_manage_mode"
                     ] = "delete"
+                    st.rerun()
 
             st.divider()
 
@@ -4433,20 +4522,13 @@ elif page == "💳 Πληρωμές":
 
     # ---------------- Καταχώρηση πληρωμής ----------------
     with tab_record:
-        payment_team = st.selectbox(
-            "Τμήμα",
-            payment_teams,
-            key="payment_record_team",
+        st.caption(
+            "Η αναζήτηση γίνεται σε όλα τα τμήματα και σε όλους τους παίκτες."
         )
 
-        team_players = [
-            p for p in players
-            if p.get("team") == payment_team
-        ]
-
         payment_player = searchable_player_select(
-            "Παίκτης — γράψε όνομα για αναζήτηση",
-            team_players,
+            "Παίκτης — γράψε όνομα, επώνυμο ή νούμερο φανέλας",
+            players,
             key="payment_record_player",
         )
 
@@ -4598,6 +4680,26 @@ elif page == "💳 Πληρωμές":
                     "Αν δεν επιλέξεις έναν ενδιάμεσο μήνα, "
                     "δεν θεωρείται αυτόματα οφειλή."
                 )
+
+                if selected_months:
+                    latest_selected_month = max(selected_months)
+                    preview_month = (
+                        latest_selected_month
+                        + relativedelta(months=1)
+                    )
+                    preview_next_due = safe_date_with_day(
+                        preview_month.year,
+                        preview_month.month,
+                        paid_on.day,
+                    )
+                    st.info(
+                        "Η επόμενη πληρωμή κρατά την ίδια ημέρα "
+                        "του μήνα με την ημερομηνία πληρωμής."
+                    )
+                    st.success(
+                        "📅 Επόμενη πληρωμή: "
+                        f"{format_date(preview_next_due)}"
+                    )
 
                 total_amount = fee * len(selected_months)
                 st.metric("Συνολικό ποσό", format_money(total_amount))
@@ -4784,8 +4886,18 @@ elif page == "💳 Πληρωμές":
                         float(r.get("amount") or 0)
                         for r in month_rows
                     )
+                    paid_dates_for_month = [
+                        pd.to_datetime(r.get("paid_on")).date()
+                        for r in month_rows
+                        if r.get("paid_on")
+                    ]
+                    paid_date_text = (
+                        format_date(max(paid_dates_for_month))
+                        if paid_dates_for_month
+                        else "—"
+                    )
                     row[short_months[month_num]] = (
-                        f"✅ {format_money(month_total)}"
+                        f"✅ {format_money(month_total)} · {paid_date_text}"
                     )
                 elif exempt:
                     row[short_months[month_num]] = "➖"
