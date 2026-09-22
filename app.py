@@ -648,7 +648,7 @@ def restore_login_from_cookie():
         st.session_state.profile = profile
         queue_auth_cookie(getattr(session, "refresh_token", None))
         return True
-    except Exception as exc:
+    except Exception:
         # Bad / revoked refresh tokens cannot restore a session. A network or
         # Supabase outage should NOT silently destroy the browser session.
         message = str(exc).lower()
@@ -1467,7 +1467,7 @@ def render_single_attendance_editor(team_players, training_date, date_rows, pref
             save_attendance_status(
                 selected_id, training_date, selected_status == "✅ Παρών"
             )
-        except Exception as exc:
+        except Exception:
             st.error(f"Δεν αποθηκεύτηκε η αλλαγή: {exc}")
         else:
             set_flash("✅ Ενημερώθηκε μόνο ο επιλεγμένος παίκτης.")
@@ -3235,7 +3235,7 @@ elif page == "✅ Παρουσίες":
                     ) or (previous is None and new_status):
                         save_attendance_status(p["id"], training_date, new_status)
                         changes += 1
-            except Exception as exc:
+            except Exception:
                 st.error(
                     "Η αποθήκευση δεν ολοκληρώθηκε για όλους. "
                     "Ξαναφόρτωσε την ημέρα για να δεις ποιες αλλαγές αποθηκεύτηκαν "
@@ -4543,13 +4543,33 @@ elif page == "💳 Πληρωμές":
             )
 
             fee = float(payment_player.get("monthly_fee") or 0)
+            is_first_payment = not any(
+                row.get("player_id") == payment_player["id"]
+                for row in payment_rows
+            )
 
-            if fee <= 0:
+            if fee <= 0 and not is_first_payment:
                 st.warning(
                     "Δεν έχει οριστεί μηνιαίο ποσό για αυτόν τον παίκτη. "
                     "Πήγαινε Παίκτες → ✏️ Edit και συμπλήρωσέ το."
                 )
             else:
+                if is_first_payment:
+                    fee = st.number_input(
+                        "Μηνιαίο ποσό πρώτης πληρωμής (€)",
+                        min_value=0.0,
+                        value=fee,
+                        step=1.0,
+                        format="%.2f",
+                        key=f"first_payment_fee_{payment_player['id']}",
+                        help=(
+                            "Στην πρώτη πληρωμή αυτό το μηνιαίο ποσό "
+                            "θα αποθηκευτεί και στην καρτέλα του παίκτη. "
+                            "Για πολλούς μήνες βάλε το ποσό ενός μήνα, "
+                            "όχι το συνολικό."
+                        ),
+                    )
+
                 paid_on = st.date_input(
                     "Ημερομηνία πληρωμής",
                     value=date.today(),
@@ -4718,9 +4738,30 @@ elif page == "💳 Πληρωμές":
                     use_container_width=True,
                     key="save_multi_payment",
                 ):
-                    if not selected_months:
+                    if fee <= 0:
+                        st.error("Συμπλήρωσε μηνιαίο ποσό μεγαλύτερο από 0 €.")
+                    elif not selected_months:
                         st.error("Επίλεξε τουλάχιστον έναν μήνα.")
                     else:
+                        if is_first_payment:
+                            # Έλεγχος ξανά πριν από την εγγραφή: μπορεί
+                            # να καταχώρησε στο μεταξύ άλλος προπονητής.
+                            already_paid = (
+                                sb.table("payments")
+                                .select("id")
+                                .eq("player_id", payment_player["id"])
+                                .limit(1)
+                                .execute()
+                                .data
+                            )
+                            if already_paid:
+                                st.error(
+                                    "Έχει ήδη καταχωρηθεί πρώτη πληρωμή "
+                                    "για τον παίκτη. Ανανέωσε τη σελίδα "
+                                    "πριν συνεχίσεις."
+                                )
+                                st.stop()
+
                         duplicates = []
                         for m in selected_months:
                             existing = (
@@ -4755,6 +4796,25 @@ elif page == "💳 Πληρωμές":
                             ]
 
                             sb.table("payments").insert(payload).execute()
+
+                            # ΜΟΝΟ με την πρώτη επιτυχημένη πληρωμή:
+                            # αποθήκευση του ΜΗΝΙΑΙΟΥ ποσού στην καρτέλα
+                            # του παίκτη, όχι του συνόλου πολλών μηνών.
+                            if is_first_payment:
+                                try:
+                                    set_player_monthly_fee(
+                                        payment_player["id"], fee
+                                    )
+                                except Exception:
+                                    st.error(
+                                        "Η πληρωμή αποθηκεύτηκε, αλλά "
+                                        "δεν ενημερώθηκε το μηνιαίο ποσό "
+                                        "στην καρτέλα του παίκτη. "
+                                        "Ενημέρωσέ το από Παίκτες → Edit "
+                                        "και μην καταχωρήσεις ξανά "
+                                        "την ίδια πληρωμή."
+                                    )
+                                    st.stop()
 
                             # Αν κάποιος μήνας είχε σημειωθεί παλιότερα
                             # ως «Δεν χρεώνεται», η νέα πληρωμή τον
