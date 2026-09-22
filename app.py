@@ -4111,174 +4111,174 @@ elif page == "💳 Πληρωμές":
                     ] = "delete"
                     st.rerun()
 
-            st.divider()
+            manage_pid = st.session_state.get("payment_manage_player_id")
+            manage_mode = st.session_state.get("payment_manage_mode")
 
-        manage_pid = st.session_state.get("payment_manage_player_id")
-        manage_mode = st.session_state.get("payment_manage_mode")
+            managed_player = next(
+                (p for p in players if p["id"] == manage_pid),
+                None,
+            )
 
-        managed_player = next(
-            (p for p in players if p["id"] == manage_pid),
-            None,
-        )
+            if managed_player and managed_player["id"] == p["id"]:
+                player_rows = [
+                    r for r in payment_rows
+                    if r.get("player_id") == managed_player["id"]
+                ]
 
-        if managed_player:
-            player_rows = [
-                r for r in payment_rows
-                if r.get("player_id") == managed_player["id"]
-            ]
-
-            if not player_rows:
-                st.info(
-                    f"Δεν υπάρχουν πληρωμές για {player_short_name(managed_player)}."
-                )
-            else:
-                player_rows = sorted(
-                    player_rows,
-                    key=lambda r: (
-                        pd.to_datetime(r.get("paid_on")).date(),
-                        pd.to_datetime(r.get("coverage_month")).date()
-                        if r.get("coverage_month")
-                        else date.min,
-                    ),
-                    reverse=True,
-                )
-
-                options = {
-                    (
-                        f"{format_date(r.get('paid_on'))} · "
-                        f"{month_label(r.get('coverage_month')) if r.get('coverage_month') else 'Χωρίς μήνα'} · "
-                        f"{format_money(r.get('amount'))}"
-                    ): r
-                    for r in player_rows
-                }
-
-                selected_label = st.selectbox(
-                    "Επίλεξε πληρωμή",
-                    list(options.keys()),
-                    key=f"manage_payment_select_{managed_player['id']}",
-                )
-
-                selected_payment = options[selected_label]
-
-                if manage_mode == "edit":
-                    st.subheader(
-                        f"✏️ Edit πληρωμής — {player_short_name(managed_player)}"
+                if not player_rows:
+                    st.info(
+                        f"Δεν υπάρχουν πληρωμές για {player_short_name(managed_player)}."
+                    )
+                else:
+                    player_rows = sorted(
+                        player_rows,
+                        key=lambda r: (
+                            pd.to_datetime(r.get("paid_on")).date(),
+                            pd.to_datetime(r.get("coverage_month")).date()
+                            if r.get("coverage_month")
+                            else date.min,
+                        ),
+                        reverse=True,
                     )
 
-                    month_opts = month_options(
-                        selected_payment.get("coverage_month") or date.today()
+                    options = {
+                        (
+                            f"{format_date(r.get('paid_on'))} · "
+                            f"{month_label(r.get('coverage_month')) if r.get('coverage_month') else 'Χωρίς μήνα'} · "
+                            f"{format_money(r.get('amount'))}"
+                        ): r
+                        for r in player_rows
+                    }
+
+                    selected_label = st.selectbox(
+                        "Επίλεξε πληρωμή",
+                        list(options.keys()),
+                        key=f"manage_payment_select_{managed_player['id']}",
                     )
-                    current_month = (
-                        month_start(selected_payment.get("coverage_month"))
-                        if selected_payment.get("coverage_month")
-                        else date.today().replace(day=1)
-                    )
-                    month_index = (
-                        month_opts.index(current_month)
-                        if current_month in month_opts
-                        else 24
-                    )
 
-                    with st.form(f"edit_payment_{selected_payment['id']}"):
-                        edit_paid_on = st.date_input(
-                            "Ημερομηνία πληρωμής",
-                            value=pd.to_datetime(selected_payment.get("paid_on")).date(),
-                            format="DD/MM/YYYY",
+                    selected_payment = options[selected_label]
+
+                    if manage_mode == "edit":
+                        st.subheader(
+                            f"✏️ Edit πληρωμής — {player_short_name(managed_player)}"
                         )
 
-                        edit_month = st.selectbox(
-                            "Μήνας που καλύπτει",
-                            month_opts,
-                            index=month_index,
-                            format_func=month_label,
-                            filter_mode="contains",
+                        month_opts = month_options(
+                            selected_payment.get("coverage_month") or date.today()
+                        )
+                        current_month = (
+                            month_start(selected_payment.get("coverage_month"))
+                            if selected_payment.get("coverage_month")
+                            else date.today().replace(day=1)
+                        )
+                        month_index = (
+                            month_opts.index(current_month)
+                            if current_month in month_opts
+                            else 24
                         )
 
-                        edit_amount = st.number_input(
-                            "Ποσό (€)",
-                            min_value=0.01,
-                            value=float(selected_payment.get("amount") or 0),
-                            step=5.0,
-                        )
-
-                        edit_note = st.text_area(
-                            "Σημείωση",
-                            value=selected_payment.get("note") or "",
-                        )
-
-                        save_payment_edit = st.form_submit_button(
-                            "Αποθήκευση αλλαγών",
-                            use_container_width=True,
-                        )
-
-                    if save_payment_edit:
-                        duplicate_month = (
-                            sb.table("payments")
-                            .select("id")
-                            .eq("player_id", managed_player["id"])
-                            .eq("coverage_month", str(edit_month))
-                            .neq("id", selected_payment["id"])
-                            .execute()
-                            .data
-                        )
-
-                        if duplicate_month:
-                            st.error(
-                                f"Υπάρχει ήδη καταχώρηση για {month_label(edit_month)}."
+                        with st.form(f"edit_payment_{selected_payment['id']}"):
+                            edit_paid_on = st.date_input(
+                                "Ημερομηνία πληρωμής",
+                                value=pd.to_datetime(selected_payment.get("paid_on")).date(),
+                                format="DD/MM/YYYY",
                             )
-                        else:
+
+                            edit_month = st.selectbox(
+                                "Μήνας που καλύπτει",
+                                month_opts,
+                                index=month_index,
+                                format_func=month_label,
+                                filter_mode="contains",
+                            )
+
+                            edit_amount = st.number_input(
+                                "Ποσό (€)",
+                                min_value=0.01,
+                                value=float(selected_payment.get("amount") or 0),
+                                step=5.0,
+                            )
+
+                            edit_note = st.text_area(
+                                "Σημείωση",
+                                value=selected_payment.get("note") or "",
+                            )
+
+                            save_payment_edit = st.form_submit_button(
+                                "Αποθήκευση αλλαγών",
+                                use_container_width=True,
+                            )
+
+                        if save_payment_edit:
+                            duplicate_month = (
+                                sb.table("payments")
+                                .select("id")
+                                .eq("player_id", managed_player["id"])
+                                .eq("coverage_month", str(edit_month))
+                                .neq("id", selected_payment["id"])
+                                .execute()
+                                .data
+                            )
+
+                            if duplicate_month:
+                                st.error(
+                                    f"Υπάρχει ήδη καταχώρηση για {month_label(edit_month)}."
+                                )
+                            else:
+                                (
+                                    sb.table("payments")
+                                    .update(
+                                        {
+                                            "paid_on": str(edit_paid_on),
+                                            "coverage_month": str(edit_month),
+                                            "amount": float(edit_amount),
+                                            "note": edit_note.strip() or None,
+                                        }
+                                    )
+                                    .eq("id", selected_payment["id"])
+                                    .execute()
+                                )
+
+                                st.session_state.pop("payment_manage_player_id", None)
+                                st.session_state.pop("payment_manage_mode", None)
+                                set_flash("✅ Η πληρωμή ενημερώθηκε.")
+                                st.rerun()
+
+                    elif manage_mode == "delete":
+                        st.subheader(
+                            f"🗑️ Διαγραφή πληρωμής — {player_short_name(managed_player)}"
+                        )
+
+                        st.write(
+                            f"**{format_date(selected_payment.get('paid_on'))} — "
+                            f"{month_label(selected_payment.get('coverage_month')) if selected_payment.get('coverage_month') else 'Χωρίς μήνα'} — "
+                            f"{format_money(selected_payment.get('amount'))}**"
+                        )
+
+                        confirm = st.checkbox(
+                            "Επιβεβαίωση διαγραφής",
+                            key=f"confirm_payment_delete_{selected_payment['id']}",
+                        )
+
+                        if st.button(
+                            "Οριστική διαγραφή",
+                            type="primary",
+                            disabled=not confirm,
+                            key=f"payment_delete_final_{selected_payment['id']}",
+                        ):
                             (
                                 sb.table("payments")
-                                .update(
-                                    {
-                                        "paid_on": str(edit_paid_on),
-                                        "coverage_month": str(edit_month),
-                                        "amount": float(edit_amount),
-                                        "note": edit_note.strip() or None,
-                                    }
-                                )
+                                .delete()
                                 .eq("id", selected_payment["id"])
                                 .execute()
                             )
 
                             st.session_state.pop("payment_manage_player_id", None)
                             st.session_state.pop("payment_manage_mode", None)
-                            set_flash("✅ Η πληρωμή ενημερώθηκε.")
+                            set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
                             st.rerun()
 
-                elif manage_mode == "delete":
-                    st.subheader(
-                        f"🗑️ Διαγραφή πληρωμής — {player_short_name(managed_player)}"
-                    )
-
-                    st.write(
-                        f"**{format_date(selected_payment.get('paid_on'))} — "
-                        f"{month_label(selected_payment.get('coverage_month')) if selected_payment.get('coverage_month') else 'Χωρίς μήνα'} — "
-                        f"{format_money(selected_payment.get('amount'))}**"
-                    )
-
-                    confirm = st.checkbox(
-                        "Επιβεβαίωση διαγραφής",
-                        key=f"confirm_payment_delete_{selected_payment['id']}",
-                    )
-
-                    if st.button(
-                        "Οριστική διαγραφή",
-                        type="primary",
-                        disabled=not confirm,
-                        key=f"payment_delete_final_{selected_payment['id']}",
-                    ):
-                        (
-                            sb.table("payments")
-                            .delete()
-                            .eq("id", selected_payment["id"])
-                            .execute()
-                        )
-
-                        st.session_state.pop("payment_manage_player_id", None)
-                        st.session_state.pop("payment_manage_mode", None)
-                        set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
-                        st.rerun()
+            st.divider()
 
 
     # ---------------- Μηνιαία οικονομική εικόνα ----------------
@@ -4539,7 +4539,17 @@ elif page == "💳 Πληρωμές":
 
             info[2].metric(
                 "Μηνιαίο ποσό",
-                format_money(payment_player.get("monthly_fee")),
+                format_money(
+                    st.session_state.get(
+                        f"first_payment_fee_{payment_player['id']}",
+                        payment_player.get("monthly_fee"),
+                    )
+                    if not any(
+                        row.get("player_id") == payment_player["id"]
+                        for row in payment_rows
+                    )
+                    else payment_player.get("monthly_fee")
+                ),
             )
 
             fee = float(payment_player.get("monthly_fee") or 0)
