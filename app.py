@@ -1204,7 +1204,7 @@ def get_training_schedule(active_only=True):
         .table("training_schedule")
         .select(
             "id,day_of_week,start_time,end_time,"
-            "team,venue,notes,active,created_by,created_at"
+            "team,venue,notes,active,coach_ids,created_by,created_at"
         )
         .order("day_of_week")
         .order("start_time")
@@ -1214,6 +1214,50 @@ def get_training_schedule(active_only=True):
         query = query.eq("active", True)
 
     return query.execute().data or []
+
+
+def get_coach_directory():
+    """Names/IDs only: no finance fields or account credentials."""
+    rows = (
+        admin_client()
+        .table("profiles")
+        .select("id,full_name,role,active")
+        .in_("role", ["coach", "admin"])
+        .eq("active", True)
+        .order("full_name")
+        .execute()
+        .data or []
+    )
+    return {str(row["id"]): row["full_name"] or "Χωρίς όνομα" for row in rows}
+
+
+def get_team_coach_defaults():
+    rows = (
+        admin_client()
+        .table("team_coach_defaults")
+        .select("team,coach_ids")
+        .execute()
+        .data or []
+    )
+    return {
+        row["team"]: [str(coach_id) for coach_id in (row.get("coach_ids") or [])]
+        for row in rows
+    }
+
+
+def assigned_coach_ids(schedule_row, team_defaults):
+    """Existing rows with NULL use team defaults; explicit choices override them."""
+    saved = schedule_row.get("coach_ids")
+    if saved is None:
+        return list(team_defaults.get(schedule_row.get("team"), []))
+    return [str(coach_id) for coach_id in saved]
+
+
+def coach_names(coach_ids, coach_directory):
+    return ", ".join(
+        coach_directory.get(str(coach_id), "Προπονητής (μη ενεργός)")
+        for coach_id in coach_ids
+    ) or "—"
 
 
 def parse_schedule_time(value):
@@ -2200,6 +2244,8 @@ if page == "🏠 Dashboard":
     now = datetime.now(ATHENS_TZ)
     today = now.date()
     schedule_rows = get_training_schedule()
+    coach_directory = get_coach_directory()
+    team_coach_defaults = get_team_coach_defaults()
 
     today_occurrences = [
         item
@@ -2267,13 +2313,16 @@ if page == "🏠 Dashboard":
                     str(item.get("team") or "—")
                 )
 
+                coaches = html.escape(coach_names(
+                    assigned_coach_ids(item, team_coach_defaults),
+                    coach_directory,
+                ))
                 cols[2].markdown(
                     (
                         "<div style='line-height:1.25;'>"
                         f"<strong>{team}</strong><br>"
-                        "<span style='color:#667085; "
-                        "font-size:.82rem;'>"
-                        f"{venue}</span>"
+                        "<span style='color:#667085; font-size:.82rem;'>"
+                        f"{venue}<br>Προπονητές: {coaches}</span>"
                         "</div>"
                     ),
                     unsafe_allow_html=True,
@@ -2323,6 +2372,10 @@ if page == "🏠 Dashboard":
                         ),
                         "Τμήμα": item.get("team") or "—",
                         "Γήπεδο": item.get("venue") or "—",
+                        "Προπονητές": coach_names(
+                            assigned_coach_ids(item, team_coach_defaults),
+                            coach_directory,
+                        ),
                     }
                 )
 
@@ -3478,13 +3531,67 @@ elif page == "📅 Πρόγραμμα":
     schedule_rows = get_training_schedule(
         active_only=False
     )
+    coach_directory = get_coach_directory()
+    team_coach_defaults = get_team_coach_defaults()
+    coach_options = list(coach_directory)
+
+    def reset_new_coaches_for_team():
+        team = st.session_state["new_schedule_team"]
+        st.session_state["new_schedule_coaches"] = [
+            coach_id for coach_id in team_coach_defaults.get(team, [])
+            if coach_id in coach_directory
+        ]
+
+    def reset_edit_coaches_for_team(team_key, coaches_key):
+        team = st.session_state[team_key]
+        st.session_state[coaches_key] = [
+            coach_id for coach_id in team_coach_defaults.get(team, [])
+            if coach_id in coach_directory
+        ]
 
     if role_is_admin():
+        with st.expander("👥 Προεπιλεγμένοι προπονητές ανά τμήμα", expanded=False):
+            st.caption("Οι προεπιλογές ισχύουν για νέες προπονήσεις. "
+                       "Οι ήδη καταχωρημένες επιλογές προπονητών δεν αντικαθίστανται.")
+            default_team = st.selectbox(
+                "Τμήμα", TEAMS, key="default_coach_team"
+            )
+            defaults_key = f"default_coaches_{TEAMS.index(default_team)}"
+            if defaults_key not in st.session_state:
+                st.session_state[defaults_key] = [
+                    coach_id for coach_id in team_coach_defaults.get(default_team, [])
+                    if coach_id in coach_directory
+                ]
+            new_default_coaches = st.multiselect(
+                "Προεπιλεγμένος προπονητής / προπονητές",
+                options=coach_options,
+                key=defaults_key,
+                format_func=lambda cid: coach_directory[cid],
+            )
+            if st.button("💾 Αποθήκευση προεπιλογής", key="save_team_coaches"):
+                try:
+                    (
+                        admin_client()
+                        .table("team_coach_defaults")
+                        .upsert(
+                            {"team": default_team, "coach_ids": new_default_coaches},
+                            on_conflict="team",
+                        )
+                        .execute()
+                    )
+                except Exception as exc:
+                    st.error(f"Δεν αποθηκεύτηκε η προεπιλογή: {exc}")
+                else:
+                    if st.session_state.get("new_schedule_team") == default_team:
+                        st.session_state["new_schedule_coaches"] = list(new_default_coaches)
+                    set_flash("✅ Η προεπιλογή προπονητών αποθηκεύτηκε.")
+                    st.rerun()
+
         with st.expander(
             "➕ Νέα προπόνηση",
             expanded=False,
         ):
-            with st.form("new_training_schedule"):
+            with st.container():
                 new_day = st.selectbox(
                     "Ημέρα",
                     list(GREEK_WEEKDAYS.keys()),
@@ -3507,9 +3614,23 @@ elif page == "📅 Πρόγραμμα":
                     ).time(),
                 )
 
+                if "new_schedule_team" not in st.session_state:
+                    st.session_state["new_schedule_team"] = TEAMS[0]
+                if "new_schedule_coaches" not in st.session_state:
+                    reset_new_coaches_for_team()
                 new_team = st.selectbox(
                     "Τμήμα",
                     TEAMS,
+                    key="new_schedule_team",
+                    on_change=reset_new_coaches_for_team,
+                )
+                new_coaches = st.multiselect(
+                    "Προπονητής / Προπονητές",
+                    options=coach_options,
+                    key="new_schedule_coaches",
+                    format_func=lambda cid: coach_directory[cid],
+                    help="Αρχικά συμπληρώνεται η προεπιλογή του τμήματος. "
+                         "Μπορείς να την αλλάξεις μόνο για αυτή την προπόνηση.",
                 )
 
                 new_venue = st.text_input(
@@ -3522,7 +3643,7 @@ elif page == "📅 Πρόγραμμα":
                 )
 
                 create_training = (
-                    st.form_submit_button(
+                    st.button(
                         "Αποθήκευση προπόνησης",
                         use_container_width=True,
                     )
@@ -3534,6 +3655,8 @@ elif page == "📅 Πρόγραμμα":
                         "Η ώρα λήξης πρέπει να είναι "
                         "μετά την ώρα έναρξης."
                     )
+                elif not new_coaches:
+                    st.error("Επίλεξε τουλάχιστον έναν προπονητή.")
                 else:
                     (
                         sb.table("training_schedule")
@@ -3547,6 +3670,7 @@ elif page == "📅 Πρόγραμμα":
                                     "%H:%M:%S"
                                 ),
                                 "team": new_team,
+                                "coach_ids": new_coaches,
                                 "venue": (
                                     new_venue.strip()
                                     or None
@@ -3605,9 +3729,11 @@ elif page == "📅 Πρόγραμμα":
                 cols[1].write(
                     row.get("team") or "—"
                 )
-                cols[2].write(
-                    row.get("venue") or "—"
-                )
+                cols[2].write(row.get("venue") or "—")
+                cols[2].caption("Προπονητές: " + coach_names(
+                    assigned_coach_ids(row, team_coach_defaults),
+                    coach_directory,
+                ))
                 cols[3].write(
                     "✅"
                     if row.get("active", True)
@@ -3630,6 +3756,7 @@ elif page == "📅 Πρόγραμμα":
                             st.session_state[
                                 "schedule_edit_id"
                             ] = row["id"]
+                            st.session_state.pop("_edit_schedule_loaded_id", None)
                             st.rerun()
 
                         if e2.button(
@@ -3664,6 +3791,20 @@ elif page == "📅 Πρόγραμμα":
         if selected_schedule:
             @st.dialog("✏️ Edit προπόνησης")
             def edit_schedule_dialog():
+                team_key = f"edit_schedule_team_{selected_schedule['id']}"
+                coaches_key = f"edit_schedule_coaches_{selected_schedule['id']}"
+                if st.session_state.get("_edit_schedule_loaded_id") != selected_schedule["id"]:
+                    initial_team = selected_schedule.get("team")
+                    if initial_team not in TEAMS:
+                        initial_team = TEAMS[0]
+                    st.session_state[team_key] = initial_team
+                    st.session_state[coaches_key] = [
+                        coach_id for coach_id in assigned_coach_ids(
+                            selected_schedule, team_coach_defaults,
+                        ) if coach_id in coach_directory
+                    ]
+                    st.session_state["_edit_schedule_loaded_id"] = selected_schedule["id"]
+
                 current_day = int(
                     selected_schedule.get(
                         "day_of_week",
@@ -3714,7 +3855,15 @@ elif page == "📅 Πρόγραμμα":
                     "Τμήμα",
                     TEAMS,
                     index=team_index,
-                    key="edit_schedule_team",
+                    key=team_key,
+                    on_change=reset_edit_coaches_for_team,
+                    args=(team_key, coaches_key),
+                )
+                edit_coaches = st.multiselect(
+                    "Προπονητής / Προπονητές",
+                    options=coach_options,
+                    key=coaches_key,
+                    format_func=lambda cid: coach_directory[cid],
                 )
 
                 edit_venue = st.text_input(
@@ -3762,6 +3911,8 @@ elif page == "📅 Πρόγραμμα":
                             "Η ώρα λήξης πρέπει να "
                             "είναι μετά την ώρα έναρξης."
                         )
+                    elif not edit_coaches:
+                        st.error("Επίλεξε τουλάχιστον έναν προπονητή.")
                     else:
                         (
                             sb.table(
@@ -3783,6 +3934,7 @@ elif page == "📅 Πρόγραμμα":
                                         )
                                     ),
                                     "team": edit_team,
+                                    "coach_ids": edit_coaches,
                                     "venue": (
                                         edit_venue.strip()
                                         or None
@@ -3805,6 +3957,7 @@ elif page == "📅 Πρόγραμμα":
                             .execute()
                         )
 
+                        st.session_state.pop("_edit_schedule_loaded_id", None)
                         st.session_state.pop(
                             "schedule_edit_id",
                             None,
@@ -3819,6 +3972,7 @@ elif page == "📅 Πρόγραμμα":
                     "Ακύρωση",
                     use_container_width=True,
                 ):
+                    st.session_state.pop("_edit_schedule_loaded_id", None)
                     st.session_state.pop(
                         "schedule_edit_id",
                         None,
