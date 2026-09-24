@@ -1656,6 +1656,56 @@ def get_all_payments():
 
 
 
+def payment_transactions(rows):
+    """One original payment transaction, even when it covers several months.
+
+    Existing rows without payment_batch_id remain independent transactions.
+    This is a read-only grouping: no historical payment rows are modified.
+    """
+    groups = {}
+    for r in rows:
+        batch_id = r.get("payment_batch_id")
+        key = ("batch", batch_id) if batch_id else ("row", r["id"])
+        if key not in groups:
+            groups[key] = {
+                "key": key,
+                "batch_id": batch_id or None,
+                "rows": [],
+            }
+        groups[key]["rows"].append(r)
+
+    result = []
+    for group in groups.values():
+        group["rows"].sort(
+            key=lambda r: (
+                month_start(r["coverage_month"])
+                if r.get("coverage_month") else date.min
+            )
+        )
+        group["months"] = [
+            month_start(r["coverage_month"])
+            for r in group["rows"] if r.get("coverage_month")
+        ]
+        group["paid_on"] = max(
+            (pd.to_datetime(r["paid_on"]).date()
+             for r in group["rows"] if r.get("paid_on")),
+            default=None,
+        )
+        group["total"] = sum(
+            float(r.get("amount") or 0) for r in group["rows"]
+        )
+        result.append(group)
+
+    result.sort(
+        key=lambda group: (
+            group["paid_on"] or date.min,
+            max(group["months"], default=date.min),
+        ),
+        reverse=True,
+    )
+    return result
+
+
 def get_payment_exemptions():
     try:
         return (
@@ -4284,152 +4334,176 @@ elif page == "💳 Πληρωμές":
                         f"Δεν υπάρχουν πληρωμές για {player_short_name(managed_player)}."
                     )
                 else:
-                    player_rows = sorted(
-                        player_rows,
-                        key=lambda r: (
-                            pd.to_datetime(r.get("paid_on")).date(),
-                            pd.to_datetime(r.get("coverage_month")).date()
-                            if r.get("coverage_month")
-                            else date.min,
-                        ),
-                        reverse=True,
-                    )
+                    # Μια πληρωμή πολλών μηνών είναι ΜΙΑ συναλλαγή.
+                    # Η επεξεργασία ημερομηνίας/ποσού/σημείωσης
+                    # ενημερώνει ολόκληρη τη συναλλαγή, όχι τυχαίο μήνα.
+                    transactions = payment_transactions(player_rows)
+                    tx_options = [t["key"] for t in transactions]
+                    tx_by_key = {t["key"]: t for t in transactions}
 
-                    options = {
-                        (
-                            f"{format_date(r.get('paid_on'))} · "
-                            f"{month_label(r.get('coverage_month')) if r.get('coverage_month') else 'Χωρίς μήνα'} · "
-                            f"{format_money(r.get('amount'))}"
-                        ): r
-                        for r in player_rows
-                    }
-
-                    selected_label = st.selectbox(
+                    selected_key = st.selectbox(
                         "Επίλεξε πληρωμή",
-                        list(options.keys()),
+                        tx_options,
+                        format_func=lambda key: (
+                            f"{format_date(tx_by_key[key]['paid_on'])} · "
+                            + (", ".join(month_label(m) for m in tx_by_key[key]["months"])
+                               or "Χωρίς μήνα")
+                            + f" · {format_money(tx_by_key[key]['total'])}"
+                        ),
                         key=f"manage_payment_select_{managed_player['id']}",
                     )
-
-                    selected_payment = options[selected_label]
+                    transaction = tx_by_key[selected_key]
+                    tx_rows = transaction["rows"]
+                    selected_payment = tx_rows[0]
+                    is_multi_month = len(tx_rows) > 1
+                    tx_months = transaction["months"]
+                    is_batch = bool(transaction["batch_id"])
 
                     if manage_mode == "edit":
                         st.subheader(
                             f"✏️ Edit πληρωμής — {player_short_name(managed_player)}"
                         )
+                        if is_multi_month:
+                            st.info(
+                                "Αυτή η πληρωμή καλύπτει "
+                                + ", ".join(month_label(m) for m in tx_months)
+                                + ". Αλλαγές στην ημερομηνία, στο μηνιαίο "
+                                "ποσό και στη σημείωση θα ισχύσουν για "
+                                "ΟΛΟΥΣ τους μήνες αυτής της πληρωμής. "
+                                "Οι μήνες κάλυψης δεν αλλάζουν εδώ."
+                            )
+                        else:
+                            month_opts = month_options(
+                                selected_payment.get("coverage_month") or date.today()
+                            )
+                            current_month = (
+                                month_start(selected_payment["coverage_month"])
+                                if selected_payment.get("coverage_month")
+                                else date.today().replace(day=1)
+                            )
+                            month_index = (
+                                month_opts.index(current_month)
+                                if current_month in month_opts else 24
+                            )
 
-                        month_opts = month_options(
-                            selected_payment.get("coverage_month") or date.today()
-                        )
-                        current_month = (
-                            month_start(selected_payment.get("coverage_month"))
-                            if selected_payment.get("coverage_month")
-                            else date.today().replace(day=1)
-                        )
-                        month_index = (
-                            month_opts.index(current_month)
-                            if current_month in month_opts
-                            else 24
-                        )
-
-                        with st.form(f"edit_payment_{selected_payment['id']}"):
+                        with st.form(
+                            f"edit_payment_{selected_payment['id']}_"
+                            f"{transaction['batch_id'] or 'single'}"
+                        ):
                             edit_paid_on = st.date_input(
                                 "Ημερομηνία πληρωμής",
-                                value=pd.to_datetime(selected_payment.get("paid_on")).date(),
+                                value=transaction["paid_on"] or date.today(),
                                 format="DD/MM/YYYY",
                             )
-
-                            edit_month = st.selectbox(
-                                "Μήνας που καλύπτει",
-                                month_opts,
-                                index=month_index,
-                                format_func=month_label,
-                                filter_mode="contains",
-                            )
-
+                            if not is_multi_month:
+                                edit_month = st.selectbox(
+                                    "Μήνας που καλύπτει",
+                                    month_opts,
+                                    index=month_index,
+                                    format_func=month_label,
+                                    filter_mode="contains",
+                                )
                             edit_amount = st.number_input(
-                                "Ποσό (€)",
+                                "Μηνιαίο ποσό (€)" if is_multi_month else "Ποσό (€)",
                                 min_value=0.01,
                                 value=float(selected_payment.get("amount") or 0),
                                 step=5.0,
                             )
-
                             edit_note = st.text_area(
                                 "Σημείωση",
                                 value=selected_payment.get("note") or "",
                             )
-
                             save_payment_edit = st.form_submit_button(
                                 "Αποθήκευση αλλαγών",
                                 use_container_width=True,
                             )
 
                         if save_payment_edit:
-                            duplicate_month = (
-                                sb.table("payments")
-                                .select("id")
-                                .eq("player_id", managed_player["id"])
-                                .eq("coverage_month", str(edit_month))
-                                .neq("id", selected_payment["id"])
-                                .execute()
-                                .data
-                            )
-
+                            duplicate_month = []
+                            if not is_multi_month:
+                                duplicate_month = (
+                                    sb.table("payments")
+                                    .select("id")
+                                    .eq("player_id", managed_player["id"])
+                                    .eq("coverage_month", str(edit_month))
+                                    .neq("id", selected_payment["id"])
+                                    .execute()
+                                    .data
+                                )
                             if duplicate_month:
                                 st.error(
                                     f"Υπάρχει ήδη καταχώρηση για {month_label(edit_month)}."
                                 )
                             else:
-                                (
+                                edit_payload = {
+                                    "paid_on": str(edit_paid_on),
+                                    "amount": float(edit_amount),
+                                    "note": edit_note.strip() or None,
+                                }
+                                if not is_multi_month:
+                                    edit_payload["coverage_month"] = str(edit_month)
+                                edit_query = (
                                     sb.table("payments")
-                                    .update(
-                                        {
-                                            "paid_on": str(edit_paid_on),
-                                            "coverage_month": str(edit_month),
-                                            "amount": float(edit_amount),
-                                            "note": edit_note.strip() or None,
-                                        }
-                                    )
-                                    .eq("id", selected_payment["id"])
-                                    .execute()
+                                    .update(edit_payload)
+                                    .eq("player_id", managed_player["id"])
                                 )
+                                if is_batch:
+                                    edit_query = edit_query.eq(
+                                        "payment_batch_id", transaction["batch_id"]
+                                    )
+                                else:
+                                    edit_query = edit_query.eq("id", selected_payment["id"])
+                                edit_query.execute()
 
                                 st.session_state.pop("payment_manage_player_id", None)
                                 st.session_state.pop("payment_manage_mode", None)
-                                set_flash("✅ Η πληρωμή ενημερώθηκε.")
+                                set_flash("✅ Η πληρωμή ενημερώθηκε σε όλες τις προβολές.")
                                 st.rerun()
 
                     elif manage_mode == "delete":
                         st.subheader(
                             f"🗑️ Διαγραφή πληρωμής — {player_short_name(managed_player)}"
                         )
-
                         st.write(
-                            f"**{format_date(selected_payment.get('paid_on'))} — "
-                            f"{month_label(selected_payment.get('coverage_month')) if selected_payment.get('coverage_month') else 'Χωρίς μήνα'} — "
-                            f"{format_money(selected_payment.get('amount'))}**"
+                            f"**{format_date(transaction['paid_on'])} — "
+                            + (", ".join(month_label(m) for m in tx_months)
+                               or "Χωρίς μήνα")
+                            + f" — {format_money(transaction['total'])}**"
                         )
-
+                        if is_multi_month:
+                            st.warning(
+                                "Η συγκεκριμένη συναλλαγή καλύπτει περισσότερους "
+                                "μήνες. Η διαγραφή θα αφαιρέσει την πληρωμή "
+                                "από ΟΛΟΥΣ αυτούς τους μήνες."
+                            )
                         confirm = st.checkbox(
-                            "Επιβεβαίωση διαγραφής",
+                            "Επιβεβαίωση διαγραφής ολόκληρης της πληρωμής",
                             key=f"confirm_payment_delete_{selected_payment['id']}",
                         )
-
                         if st.button(
-                            "Οριστική διαγραφή",
+                            "Οριστική διαγραφή πληρωμής",
                             type="primary",
                             disabled=not confirm,
                             key=f"payment_delete_final_{selected_payment['id']}",
                         ):
-                            (
+                            delete_query = (
                                 sb.table("payments")
                                 .delete()
-                                .eq("id", selected_payment["id"])
-                                .execute()
+                                .eq("player_id", managed_player["id"])
                             )
+                            if is_batch:
+                                delete_query = delete_query.eq(
+                                    "payment_batch_id", transaction["batch_id"]
+                                )
+                            else:
+                                delete_query = delete_query.eq(
+                                    "id", selected_payment["id"]
+                                )
+                            delete_query.execute()
 
                             st.session_state.pop("payment_manage_player_id", None)
                             st.session_state.pop("payment_manage_mode", None)
-                            set_flash("✅ Η διαγραφή ολοκληρώθηκε.")
+                            set_flash("✅ Η διαγραφή ολοκληρώθηκε σε όλες τις προβολές.")
                             st.rerun()
 
             st.divider()
@@ -5154,40 +5228,26 @@ elif page == "💳 Πληρωμές":
                     "για αυτόν τον παίκτη στο επιλεγμένο έτος."
                 )
             else:
-                batches = {}
-                for r in rows:
-                    batch = r.get("payment_batch_id") or r.get("id")
-                    batches.setdefault(
-                        batch,
-                        {
-                            "paid_on": r.get("paid_on"),
-                            "total": 0.0,
-                            "months": [],
-                            "note": r.get("note") or "",
-                        },
-                    )
-                    batches[batch]["total"] += float(r.get("amount") or 0)
-                    batches[batch]["months"].append(
-                        month_start(r.get("coverage_month"))
-                    )
-
+                all_player_rows = [
+                    r for r in payment_rows
+                    if r.get("player_id") == history_player["id"]
+                ]
+                # Το ιστορικό δείχνει μία συναλλαγή και το πραγματικό
+                # συνολικό ποσό της, ακόμη κι αν καλύπτει δύο έτη.
+                transactions = [
+                    t for t in payment_transactions(all_player_rows)
+                    if any(m.year == history_year for m in t["months"])
+                ]
                 transaction_rows = []
-                for _, data in sorted(
-                    batches.items(),
-                    key=lambda item: pd.to_datetime(
-                        item[1]["paid_on"]
-                    ).date(),
-                    reverse=True,
-                ):
-                    months = sorted(set(data["months"]))
+                for t in transactions:
                     transaction_rows.append(
                         {
-                            "Ημερομηνία πληρωμής": format_date(data["paid_on"]),
-                            "Συνολικό ποσό": format_money(data["total"]),
+                            "Ημερομηνία πληρωμής": format_date(t["paid_on"]),
+                            "Συνολικό ποσό": format_money(t["total"]),
                             "Μήνες": ", ".join(
-                                month_label(m) for m in months
+                                month_label(m) for m in t["months"]
                             ),
-                            "Σημείωση": data["note"] or "—",
+                            "Σημείωση": t["rows"][0].get("note") or "—",
                         }
                     )
 
