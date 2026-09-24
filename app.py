@@ -25,6 +25,8 @@ AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 
 TEAMS = [
     "Παμπαίδων Α’",
+    "2012-2013",
+    "2013",
     "2012–2013 Β’",
     "Junior NBA",
     "2014–2015 Α’",
@@ -2951,7 +2953,7 @@ elif page == "👥 Παίκτες":
                         ) == team_name
                     ]
 
-                    if team_rows:
+                    if team_rows or team_name in ("2012-2013", "2013"):
                         teams_with_players.append(
                             (team_name, team_rows)
                         )
