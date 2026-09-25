@@ -1745,6 +1745,23 @@ def player_payment_status(player, payment_rows, exemptions=None):
     exemptions = exemptions or []
     player_id = player["id"]
 
+    # A recorded 0€ waiver is not a missing first payment and must never
+    # mark an exempt child as overdue. A plain unset 0€ fee without any
+    # recorded waiver retains the previous "first payment missing" status.
+    has_waiver = any(
+        e.get("player_id") == player_id
+        for e in exemptions
+    )
+    if float(player.get("monthly_fee") or 0) == 0 and has_waiver:
+        return {
+            "label": "ΔΕΝ ΧΡΕΩΝΕΤΑΙ",
+            "state": "exempt",
+            "last_paid_on": None,
+            "next_due": None,
+            "last_covered_month": None,
+            "anchor_day": None,
+        }
+
     rows = [
         r for r in payment_rows
         if r.get("player_id") == player_id
@@ -4267,6 +4284,13 @@ elif page == "💳 Πληρωμές":
                     "ΕΝΤΑΞΕΙ"
                     "</span>"
                 )
+            elif status["state"] == "exempt":
+                status_html = (
+                    "<span class='payment-status-pill "
+                    "payment-status-neutral'>"
+                    "ΔΕΝ ΧΡΕΩΝΕΤΑΙ"
+                    "</span>"
+                )
             else:
                 status_html = (
                     "<span class='payment-status-pill "
@@ -4801,9 +4825,11 @@ elif page == "💳 Πληρωμές":
                 ),
             )
 
-            if fee <= 0:
-                st.warning(
-                    "Συμπλήρωσε το μηνιαίο ποσό πριν καταχωρήσεις την πληρωμή."
+            if fee == 0:
+                st.info(
+                    "Μηνιαίο ποσό 0 €: ο παίκτης δεν χρεώνεται. "
+                    "Οι μήνες που επιλέγεις θα καταχωρηθούν ως "
+                    "«Δεν χρεώνεται», χωρίς να εμφανιστούν ως εισπράξεις."
                 )
 
             paid_on = st.date_input(
@@ -4817,6 +4843,17 @@ elif page == "💳 Πληρωμές":
                 payment_player["id"],
                 payment_rows,
             )
+            if fee == 0:
+                # For players recorded as exempt, suggest the month after
+                # the latest waiver rather than repeatedly suggesting today.
+                waived_months = [
+                    month_start(e["coverage_month"])
+                    for e in payment_exemptions
+                    if e.get("player_id") == payment_player["id"]
+                    and e.get("coverage_month")
+                ]
+                if waived_months and max(waived_months) >= next_month:
+                    next_month = max(waived_months) + relativedelta(months=1)
 
             current_year = date.today().year
             year_options = list(range(current_year - 5, current_year + 6))
@@ -4931,7 +4968,7 @@ elif page == "💳 Πληρωμές":
                 "δεν θεωρείται αυτόματα οφειλή."
             )
 
-            if selected_months:
+            if selected_months and fee > 0:
                 latest_selected_month = max(selected_months)
                 preview_month = (
                     latest_selected_month
@@ -4969,15 +5006,87 @@ elif page == "💳 Πληρωμές":
             )
 
             if st.button(
-                "Καταχώρηση πληρωμής",
+                "Καταχώρηση απαλλαγής (0 €)" if fee == 0 else "Καταχώρηση πληρωμής",
                 type="primary",
                 use_container_width=True,
                 key="save_multi_payment",
             ):
-                if fee <= 0:
-                    st.error("Συμπλήρωσε μηνιαίο ποσό μεγαλύτερο από 0 €.")
-                elif not selected_months:
+                if not selected_months:
                     st.error("Επίλεξε τουλάχιστον έναν μήνα.")
+                elif fee == 0:
+                    # No money was received: record a month-specific waiver,
+                    # NOT a fictitious zero-value payment. The app already
+                    # uses these rows in the monthly summary and history.
+                    paid_conflicts = [
+                        month_label(m) for m in selected_months
+                        if any(
+                            r.get("player_id") == payment_player["id"]
+                            and r.get("coverage_month")
+                            and month_start(r["coverage_month"]) == m
+                            for r in payment_rows
+                        )
+                    ]
+                    if paid_conflicts:
+                        st.error(
+                            "Υπάρχει ήδη πληρωμή για: "
+                            + ", ".join(paid_conflicts)
+                            + ". Για αλλαγή υπάρχουσας συναλλαγής "
+                            "χρησιμοποίησε το Edit πληρωμής."
+                        )
+                        st.stop()
+
+                    new_waivers = [
+                        {
+                            "player_id": payment_player["id"],
+                            "coverage_month": str(m),
+                            "created_by": st.session_state.user.id,
+                            "note": note.strip() or None,
+                        }
+                        for m in selected_months
+                        if not is_exempt_month(
+                            payment_player["id"], m, payment_exemptions
+                        )
+                    ]
+                    try:
+                        if new_waivers:
+                            sb.table("payment_month_exemptions").insert(
+                                new_waivers
+                            ).execute()
+                    except Exception:
+                        st.error(
+                            "Δεν αποθηκεύτηκε η απαλλαγή. "
+                            "Έλεγξε την καταχώρηση πριν προσπαθήσεις ξανά."
+                        )
+                        st.stop()
+
+                    try:
+                        # Keep the player's fee and all views aligned.
+                        set_player_monthly_fee(payment_player["id"], 0.0)
+                    except Exception:
+                        st.error(
+                            "Οι απαλλαγές αποθηκεύτηκαν, αλλά δεν "
+                            "ενημερώθηκε το μηνιαίο ποσό του παίκτη. "
+                            "Διόρθωσέ το στο Παίκτες → Edit. "
+                            "Μην καταχωρήσεις ξανά τους ίδιους μήνες."
+                        )
+                        st.stop()
+
+                    years_to_clear = {primary_year}
+                    if second_year is not None:
+                        years_to_clear.add(second_year)
+                    for y in years_to_clear:
+                        for month_num in range(1, 13):
+                            st.session_state.pop(
+                                f"pay_month_{payment_player['id']}_{y}_{month_num}",
+                                None,
+                            )
+                    st.session_state[second_year_key] = False
+                    set_flash(
+                        "✅ Δεν χρεώνεται (0 €): "
+                        + ", ".join(month_label(m) for m in selected_months)
+                        + ". Δεν καταχωρήθηκε είσπραξη."
+                    )
+                    st.rerun()
                 else:
                     if is_first_payment:
                         # Έλεγχος ξανά πριν από την εγγραφή: μπορεί
