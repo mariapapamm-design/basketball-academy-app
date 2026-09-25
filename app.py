@@ -1714,6 +1714,36 @@ def payment_transactions(rows):
     return result
 
 
+def plan_payment_transaction_edit(current_rows, updated_months):
+    """Plan minimal modifications without creating duplicate covered months.
+
+    Existing row IDs are preserved for unchanged months and reused for newly
+    selected months where possible. This function does not write to the DB.
+    """
+    original_by_month = {
+        month_start(row["coverage_month"]): row
+        for row in current_rows if row.get("coverage_month")
+    }
+    original_months = [
+        month_start(row["coverage_month"])
+        for row in current_rows if row.get("coverage_month")
+    ]
+    if len(original_by_month) != len(original_months):
+        raise ValueError("Η συναλλαγή έχει διπλές εγγραφές μηνών.")
+    new_months = set(updated_months)
+    same = set(original_by_month) & new_months
+    removed = [
+        row for row in current_rows
+        if not row.get("coverage_month")
+        or month_start(row["coverage_month"]) not in same
+    ]
+    added = sorted(new_months - same)
+    reused = list(zip(removed, added))
+    fresh_months = added[len(reused):]
+    to_delete = removed[len(reused):]
+    return original_by_month, same, reused, fresh_months, to_delete
+
+
 def get_payment_exemptions():
     try:
         return (
@@ -4153,17 +4183,52 @@ elif page == "💳 Πληρωμές":
         if any(p.get("team") == t for p in players)
     ]
 
-    tab_status, tab_summary, tab_record, tab_history = st.tabs(
-        [
-            "Κατάσταση",
-            "📊 Μηνιαία εικόνα",
-            "➕ Καταχώρηση πληρωμής",
-            "Ιστορικό",
-        ]
+    # Apply navigation and widget resets BEFORE building the UI widgets.
+    # Streamlit does not permit changing a widget's session_state after it
+    # has been instantiated in the same rerun.
+    editor_reset = st.session_state.pop("_payment_editor_reset", None)
+    if editor_reset:
+        prefixes = (
+            f"tx_date_{editor_reset}", f"tx_amount_{editor_reset}",
+            f"tx_note_{editor_reset}", f"tx_years_{editor_reset}",
+            f"tx_month_{editor_reset}_",
+        )
+        for state_key in list(st.session_state):
+            if state_key in prefixes or state_key.startswith(
+                f"tx_month_{editor_reset}_"
+            ):
+                st.session_state.pop(state_key, None)
+
+    nav = st.session_state.pop("_payment_nav_pending", None)
+    if nav:
+        nav_player_id, nav_transaction = nav
+        nav_player = next((p for p in players if p["id"] == nav_player_id), None)
+        if nav_player:
+            st.session_state.pop("payment_manage_player_id", None)
+            st.session_state.pop("payment_manage_mode", None)
+            st.session_state["payment_record_player_id"] = nav_player_id
+            st.session_state[f"payment_record_transaction_{nav_player_id}"] = nav_transaction
+            st.session_state["payment_active_view"] = "➕ Καταχώρηση πληρωμής"
+    edit_done_for = st.session_state.pop("_payment_editor_new_pending", None)
+    if edit_done_for:
+        st.session_state[f"payment_record_transaction_{edit_done_for}"] = None
+
+    # A controlled navigation is needed to open Edit directly inside
+    # "Καταχώρηση πληρωμής" rather than below the status table.
+    payment_views = (
+        "Κατάσταση", "📊 Μηνιαία εικόνα",
+        "➕ Καταχώρηση πληρωμής", "Ιστορικό",
+    )
+    payment_view = st.radio(
+        "Ενότητες πληρωμών",
+        payment_views,
+        key="payment_active_view",
+        horizontal=True,
+        label_visibility="collapsed",
     )
 
     # ---------------- Κατάσταση ----------------
-    with tab_status:
+    if payment_view == "Κατάσταση":
         st.caption(
             "Η αναζήτηση γίνεται σε όλα τα τμήματα και σε όλους τους παίκτες."
         )
@@ -4322,13 +4387,21 @@ elif page == "💳 Πληρωμές":
                     disabled=not has_player_payments,
                     use_container_width=True,
                 ):
-                    st.session_state[
-                        "payment_manage_player_id"
-                    ] = p["id"]
-                    st.session_state[
-                        "payment_manage_mode"
-                    ] = "edit"
-                    st.rerun()
+                    # Navigation is applied at the start of the next rerun.
+                    # The latest transaction opens immediately; older ones
+                    # remain available in the transaction selector.
+                    player_transactions = payment_transactions([
+                        row for row in payment_rows if row.get("player_id") == p["id"]
+                    ])
+                    if player_transactions:
+                        st.session_state["_payment_nav_pending"] = (
+                            p["id"], player_transactions[0]["key"]
+                        )
+                        st.session_state["_payment_editor_reset"] = str(
+                            player_transactions[0]["batch_id"]
+                            or player_transactions[0]["rows"][0]["id"]
+                        )
+                        st.rerun()
 
                 if e2.button(
                     "🗑️ Διαγραφή",
@@ -4393,108 +4466,7 @@ elif page == "💳 Πληρωμές":
                     tx_months = transaction["months"]
                     is_batch = bool(transaction["batch_id"])
 
-                    if manage_mode == "edit":
-                        st.subheader(
-                            f"✏️ Edit πληρωμής — {player_short_name(managed_player)}"
-                        )
-                        if is_multi_month:
-                            st.info(
-                                "Αυτή η πληρωμή καλύπτει "
-                                + ", ".join(month_label(m) for m in tx_months)
-                                + ". Αλλαγές στην ημερομηνία, στο μηνιαίο "
-                                "ποσό και στη σημείωση θα ισχύσουν για "
-                                "ΟΛΟΥΣ τους μήνες αυτής της πληρωμής. "
-                                "Οι μήνες κάλυψης δεν αλλάζουν εδώ."
-                            )
-                        else:
-                            month_opts = month_options(
-                                selected_payment.get("coverage_month") or date.today()
-                            )
-                            current_month = (
-                                month_start(selected_payment["coverage_month"])
-                                if selected_payment.get("coverage_month")
-                                else date.today().replace(day=1)
-                            )
-                            month_index = (
-                                month_opts.index(current_month)
-                                if current_month in month_opts else 24
-                            )
-
-                        with st.form(
-                            f"edit_payment_{selected_payment['id']}_"
-                            f"{transaction['batch_id'] or 'single'}"
-                        ):
-                            edit_paid_on = st.date_input(
-                                "Ημερομηνία πληρωμής",
-                                value=transaction["paid_on"] or date.today(),
-                                format="DD/MM/YYYY",
-                            )
-                            if not is_multi_month:
-                                edit_month = st.selectbox(
-                                    "Μήνας που καλύπτει",
-                                    month_opts,
-                                    index=month_index,
-                                    format_func=month_label,
-                                    filter_mode="contains",
-                                )
-                            edit_amount = st.number_input(
-                                "Μηνιαίο ποσό (€)" if is_multi_month else "Ποσό (€)",
-                                min_value=0.01,
-                                value=float(selected_payment.get("amount") or 0),
-                                step=5.0,
-                            )
-                            edit_note = st.text_area(
-                                "Σημείωση",
-                                value=selected_payment.get("note") or "",
-                            )
-                            save_payment_edit = st.form_submit_button(
-                                "Αποθήκευση αλλαγών",
-                                use_container_width=True,
-                            )
-
-                        if save_payment_edit:
-                            duplicate_month = []
-                            if not is_multi_month:
-                                duplicate_month = (
-                                    sb.table("payments")
-                                    .select("id")
-                                    .eq("player_id", managed_player["id"])
-                                    .eq("coverage_month", str(edit_month))
-                                    .neq("id", selected_payment["id"])
-                                    .execute()
-                                    .data
-                                )
-                            if duplicate_month:
-                                st.error(
-                                    f"Υπάρχει ήδη καταχώρηση για {month_label(edit_month)}."
-                                )
-                            else:
-                                edit_payload = {
-                                    "paid_on": str(edit_paid_on),
-                                    "amount": float(edit_amount),
-                                    "note": edit_note.strip() or None,
-                                }
-                                if not is_multi_month:
-                                    edit_payload["coverage_month"] = str(edit_month)
-                                edit_query = (
-                                    sb.table("payments")
-                                    .update(edit_payload)
-                                    .eq("player_id", managed_player["id"])
-                                )
-                                if is_batch:
-                                    edit_query = edit_query.eq(
-                                        "payment_batch_id", transaction["batch_id"]
-                                    )
-                                else:
-                                    edit_query = edit_query.eq("id", selected_payment["id"])
-                                edit_query.execute()
-
-                                st.session_state.pop("payment_manage_player_id", None)
-                                st.session_state.pop("payment_manage_mode", None)
-                                set_flash("✅ Η πληρωμή ενημερώθηκε σε όλες τις προβολές.")
-                                st.rerun()
-
-                    elif manage_mode == "delete":
+                    if manage_mode == "delete":
                         st.subheader(
                             f"🗑️ Διαγραφή πληρωμής — {player_short_name(managed_player)}"
                         )
@@ -4544,7 +4516,7 @@ elif page == "💳 Πληρωμές":
 
 
     # ---------------- Μηνιαία οικονομική εικόνα ----------------
-    with tab_summary:
+    if payment_view == "📊 Μηνιαία εικόνα":
         st.subheader("📊 Μηνιαία οικονομική εικόνα")
 
         summary_team_options = ["Όλα τα τμήματα"] + payment_teams
@@ -4777,18 +4749,274 @@ elif page == "💳 Πληρωμές":
                 st.divider()
 
     # ---------------- Καταχώρηση πληρωμής ----------------
-    with tab_record:
+    if payment_view == "➕ Καταχώρηση πληρωμής":
         st.caption(
             "Η αναζήτηση γίνεται σε όλα τα τμήματα και σε όλους τους παίκτες."
         )
 
-        payment_player = searchable_player_select(
+        payment_player_lookup = {p["id"]: p for p in players}
+        payment_selected_id = st.selectbox(
             "Παίκτης — γράψε όνομα, επώνυμο ή νούμερο φανέλας",
-            players,
-            key="payment_record_player",
+            list(payment_player_lookup),
+            format_func=lambda player_id: player_short_name(
+                payment_player_lookup[player_id]
+            ),
+            key="payment_record_player_id",
+            filter_mode="contains",
         )
+        payment_player = payment_player_lookup.get(payment_selected_id)
 
+        chosen_transaction = None
         if payment_player:
+            existing_player_rows = [
+                row for row in payment_rows
+                if row.get("player_id") == payment_player["id"]
+            ]
+            previous_transactions = payment_transactions(existing_player_rows)
+            transaction_lookup = {tx["key"]: tx for tx in previous_transactions}
+            transaction_options = [None] + [tx["key"] for tx in previous_transactions]
+            transaction_key = f"payment_record_transaction_{payment_player['id']}"
+            # A stale selection (payment deleted by another coach) is reset.
+            if st.session_state.get(transaction_key) not in transaction_options:
+                st.session_state[transaction_key] = None
+            chosen_key = st.selectbox(
+                "Επίλεξε παλαιότερη πληρωμή για διόρθωση",
+                transaction_options,
+                format_func=lambda key: (
+                    "➕ Νέα πληρωμή" if key is None else
+                    f"{format_date(transaction_lookup[key]['paid_on'])} · "
+                    + (", ".join(month_label(m) for m in transaction_lookup[key]["months"])
+                       or "Χωρίς μήνα")
+                    + f" · {format_money(transaction_lookup[key]['total'])}"
+                ),
+                key=transaction_key,
+            )
+            chosen_transaction = transaction_lookup.get(chosen_key)
+
+        if payment_player and chosen_transaction:
+            tx = chosen_transaction
+            tx_rows = tx["rows"]
+            old_ids = [row["id"] for row in tx_rows]
+            old_months = set(tx["months"])
+            form_key = str(tx["batch_id"] or tx_rows[0]["id"])
+            st.subheader(f"✏️ Διόρθωση πληρωμής — {player_short_name(payment_player)}")
+            st.caption("Αλλάζεις την υπάρχουσα συναλλαγή· δεν καταχωρείται δεύτερη πληρωμή.")
+            if len(tx_rows) > 1:
+                st.info(
+                    "Η συγκεκριμένη συναλλαγή καλύπτει πολλούς μήνες. "
+                    "Το μηνιαίο ποσό και η ημερομηνία που διορθώνεις "
+                    "θα ισχύουν για όλους τους επιλεγμένους μήνες."
+                )
+            edit_date = st.date_input(
+                "Ημερομηνία πληρωμής",
+                value=tx["paid_on"] or date.today(),
+                format="DD/MM/YYYY",
+                key=f"tx_date_{form_key}",
+            )
+            edit_fee = st.number_input(
+                "Μηνιαίο ποσό (€)",
+                min_value=0.01,
+                value=float(tx_rows[0].get("amount") or 0),
+                step=1.0,
+                format="%.2f",
+                key=f"tx_amount_{form_key}",
+            )
+            edit_note = st.text_area(
+                "Σημείωση",
+                value=tx_rows[0].get("note") or "",
+                key=f"tx_note_{form_key}",
+            )
+            current_year = date.today().year
+            year_choices = sorted(
+                set(range(current_year - 8, current_year + 9))
+                | {m.year for m in old_months}
+            )
+            edit_years = st.multiselect(
+                "Έτη κάλυψης — επίλεξε ένα ή περισσότερα",
+                year_choices,
+                default=sorted({m.year for m in old_months}) or [current_year],
+                key=f"tx_years_{form_key}",
+            )
+            month_abbrev = {
+                1: "Ιαν", 2: "Φεβ", 3: "Μαρ", 4: "Απρ",
+                5: "Μάι", 6: "Ιουν", 7: "Ιουλ", 8: "Αυγ",
+                9: "Σεπ", 10: "Οκτ", 11: "Νοε", 12: "Δεκ",
+            }
+            updated_months = []
+            for edit_year in sorted(edit_years):
+                st.markdown(f"**{edit_year} — μήνες που καλύπτει:**")
+                for start_month in (1, 5, 9):
+                    month_cols = st.columns(4)
+                    for offset in range(4):
+                        mm = start_month + offset
+                        month_value = date(edit_year, mm, 1)
+                        selected = month_cols[offset].checkbox(
+                            month_abbrev[mm],
+                            value=month_value in old_months,
+                            key=f"tx_month_{form_key}_{edit_year}_{mm}",
+                        )
+                        if selected:
+                            updated_months.append(month_value)
+            updated_months = sorted(set(updated_months))
+            st.metric("Συνολικό ποσό", format_money(edit_fee * len(updated_months)))
+            st.caption(
+                "Η διόρθωση παλαιότερης πληρωμής δεν αλλάζει αυτόματα τη "
+                "σημερινή μηνιαία συνδρομή του παίκτη."
+            )
+            edit_col, cancel_col = st.columns([3, 1])
+            save_edit = edit_col.button(
+                "💾 Αποθήκευση αλλαγών πληρωμής",
+                type="primary", use_container_width=True,
+                key=f"tx_save_{form_key}",
+            )
+            if cancel_col.button(
+                "Ακύρωση edit", use_container_width=True,
+                key=f"tx_cancel_{form_key}",
+            ):
+                st.session_state["_payment_editor_new_pending"] = payment_player["id"]
+                st.session_state["_payment_editor_reset"] = form_key
+                st.rerun()
+            if save_edit:
+                if not updated_months:
+                    st.error("Επίλεξε τουλάχιστον έναν μήνα κάλυψης.")
+                else:
+                    try:
+                        # Refresh the selected transaction before changing data.
+                        # Restrict every write to this player's existing row IDs.
+                        current_rows = (
+                            sb.table("payments")
+                            .select("id,player_id,coverage_month,payment_batch_id,paid_on,amount,note")
+                            .eq("player_id", payment_player["id"])
+                            .in_("id", old_ids)
+                            .execute().data or []
+                        )
+                        if {r["id"] for r in current_rows} != set(old_ids):
+                            st.error("Η πληρωμή άλλαξε στο μεταξύ. Ανανέωσε τη σελίδα.")
+                            st.stop()
+                        if tx["batch_id"]:
+                            # The batch may have been expanded since the UI
+                            # loaded; do not silently leave new rows behind.
+                            batch_now = (
+                                sb.table("payments")
+                                .select("id")
+                                .eq("player_id", payment_player["id"])
+                                .eq("payment_batch_id", tx["batch_id"])
+                                .execute().data or []
+                            )
+                            if {r["id"] for r in batch_now} != set(old_ids):
+                                st.error("Η συναλλαγή άλλαξε στο μεταξύ. Ανανέωσε τη σελίδα.")
+                                st.stop()
+                        # Stop rather than overwrite another user's concurrent edit.
+                        originals = {r["id"]: r for r in tx_rows}
+                        for row in current_rows:
+                            original = originals[row["id"]]
+                            watched = ("coverage_month", "payment_batch_id", "paid_on", "amount", "note")
+                            if any(str(row.get(f)) != str(original.get(f)) for f in watched):
+                                st.error("Η πληρωμή ενημερώθηκε από άλλο χρήστη. Ανανέωσε τη σελίδα.")
+                                st.stop()
+                        # Check all selected months against OTHER transactions.
+                        conflicts = (
+                            sb.table("payments")
+                            .select("id,coverage_month")
+                            .eq("player_id", payment_player["id"])
+                            .in_("coverage_month", [str(m) for m in updated_months])
+                            .execute().data or []
+                        )
+                        taken = [
+                            month_label(r["coverage_month"]) for r in conflicts
+                            if r["id"] not in set(old_ids)
+                        ]
+                        if taken:
+                            st.error("Άλλη πληρωμή καλύπτει ήδη: " + ", ".join(sorted(set(taken))))
+                            st.stop()
+                        waivers = (
+                            sb.table("payment_month_exemptions")
+                            .select("coverage_month")
+                            .eq("player_id", payment_player["id"])
+                            .in_("coverage_month", [str(m) for m in updated_months])
+                            .execute().data or []
+                        )
+                        if waivers:
+                            st.error(
+                                "Υπάρχουν μήνες με απαλλαγή (0€). "
+                                "Αφαίρεσε πρώτα την απαλλαγή από τη Μηνιαία εικόνα."
+                            )
+                            st.stop()
+                        # Keep IDs for unchanged months; reuse removed-month
+                        # IDs for added months; add/delete only the true delta.
+                        by_month, same, reused, fresh_months, to_delete = (
+                            plan_payment_transaction_edit(current_rows, updated_months)
+                        )
+                        effective_batch_id = tx["batch_id"]
+                        if len(updated_months) > 1 and not effective_batch_id:
+                            effective_batch_id = str(uuid.uuid4())
+                        payload = {
+                            "paid_on": str(edit_date),
+                            "amount": float(edit_fee),
+                            "note": edit_note.strip() or None,
+                        }
+                        if effective_batch_id:
+                            payload["payment_batch_id"] = effective_batch_id
+                        # This is a multi-step REST edit, not a DB transaction.
+                        # A failed write is reported without claiming success.
+                        for m in same:
+                            sb.table("payments").update(payload).eq(
+                                "player_id", payment_player["id"]
+                            ).eq("id", by_month[m]["id"]).execute()
+                        for row, m in reused:
+                            sb.table("payments").update(
+                                {**payload, "coverage_month": str(m)}
+                            ).eq("player_id", payment_player["id"]).eq(
+                                "id", row["id"]
+                            ).execute()
+                        if fresh_months:
+                            if not effective_batch_id:
+                                effective_batch_id = str(uuid.uuid4())
+                            sb.table("payments").insert([
+                                {
+                                    **payload, "payment_batch_id": effective_batch_id,
+                                    "player_id": payment_player["id"],
+                                    "coverage_month": str(m),
+                                    "recorded_by": st.session_state.user.id,
+                                }
+                                for m in fresh_months
+                            ]).execute()
+                        if to_delete:
+                            sb.table("payments").delete().eq(
+                                "player_id", payment_player["id"]
+                            ).in_("id", [r["id"] for r in to_delete]).execute()
+                        # Read back the affected months before reporting success.
+                        checked_rows = (
+                            sb.table("payments")
+                            .select("id,coverage_month,amount,paid_on,note")
+                            .eq("player_id", payment_player["id"])
+                            .in_("coverage_month", [str(m) for m in updated_months])
+                            .execute().data or []
+                        )
+                        if (
+                            len(checked_rows) != len(updated_months)
+                            or {month_start(r["coverage_month"]) for r in checked_rows}
+                            != set(updated_months)
+                            or any(
+                                abs(float(r["amount"]) - float(edit_fee)) > 0.0001
+                                or str(r["paid_on"]) != str(edit_date)
+                                or (r.get("note") or "") != edit_note.strip()
+                                for r in checked_rows
+                            )
+                        ):
+                            raise RuntimeError("Payment edit verification failed")
+                        st.session_state["_payment_editor_new_pending"] = payment_player["id"]
+                        st.session_state["_payment_editor_reset"] = form_key
+                        set_flash("✅ Η υπάρχουσα πληρωμή διορθώθηκε και οι προβολές ενημερώθηκαν.")
+                        st.rerun()
+                    except Exception:
+                        st.error(
+                            "Δεν ολοκληρώθηκε η διόρθωση. Κάποιες αλλαγές "
+                            "ενδέχεται να αποθηκεύτηκαν: έλεγξε το Ιστορικό "
+                            "πριν δοκιμάσεις ξανά."
+                        )
+
+        if payment_player and not chosen_transaction:
             info = st.columns([0.8, 3.2, 2])
 
             with info[0]:
@@ -5199,7 +5427,7 @@ elif page == "💳 Πληρωμές":
                         )
                         st.rerun()
     # ---------------- Ιστορικό ----------------
-    with tab_history:
+    if payment_view == "Ιστορικό":
         history_team = st.selectbox(
             "Τμήμα",
             payment_teams,
@@ -5364,6 +5592,27 @@ elif page == "💳 Πληρωμές":
                     use_container_width=True,
                     hide_index=True,
                 )
+
+                st.caption("Επίλεξε μια συναλλαγή για διόρθωση:")
+                for tx in transactions:
+                    tx_label = (
+                        f"✏️ {format_date(tx['paid_on'])} · "
+                        + (", ".join(month_label(m) for m in tx["months"])
+                           or "Χωρίς μήνα")
+                        + f" · {format_money(tx['total'])}"
+                    )
+                    if st.button(
+                        tx_label,
+                        key=f"history_edit_tx_{tx['rows'][0]['id']}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["_payment_nav_pending"] = (
+                            history_player["id"], tx["key"]
+                        )
+                        st.session_state["_payment_editor_reset"] = str(
+                            tx["batch_id"] or tx["rows"][0]["id"]
+                        )
+                        st.rerun()
 
 
 # ============================================================
