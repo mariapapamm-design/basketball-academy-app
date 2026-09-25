@@ -39,6 +39,12 @@ TEAMS = [
     "Ανδρικό",
 ]
 
+
+# Only the visible label changes; keep the stored team ID unchanged so
+# existing player/team assignments and filters continue to work.
+def team_display_name(team):
+    return "2013 ΔΑΚ Φοίνικα" if team == "2013" else team
+
 JERSEY_SIZES = [
     "-", "6", "8", "10", "12", "14", "16",
     "XS", "S", "M", "L", "XL", "XXL",
@@ -2556,6 +2562,7 @@ elif page == "👥 Παίκτες":
                 "Τμήμα",
                 TEAMS,
                 index=team_index,
+                format_func=team_display_name,
             )
 
             edit_number = st.text_input(
@@ -2985,7 +2992,7 @@ elif page == "👥 Παίκτες":
                     team_rows,
                 ) in enumerate(teams_with_players):
                     with st.expander(
-                        f"🏀 {team_name} ({len(team_rows)})",
+                        f"🏀 {team_display_name(team_name)} ({len(team_rows)})",
                         expanded=False,
                     ):
                         render_player_table(
@@ -3016,6 +3023,7 @@ elif page == "👥 Παίκτες":
                 team = st.selectbox(
                     "Τμήμα",
                     TEAMS,
+                    format_func=team_display_name,
                 )
 
                 jersey_number = (
