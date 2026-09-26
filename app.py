@@ -4876,6 +4876,95 @@ elif page == "💳 Πληρωμές":
                 st.session_state["_payment_editor_new_pending"] = payment_player["id"]
                 st.session_state["_payment_editor_reset"] = form_key
                 st.rerun()
+
+            st.divider()
+            st.markdown("**🗑️ Διαγραφή αυτής της πληρωμής**")
+            delete_months_text = ", ".join(
+                month_label(m) for m in tx["months"]
+            ) or "Χωρίς μήνα"
+            st.caption(
+                f"Θα διαγραφεί η πληρωμή {format_date(tx['paid_on'])} "
+                f"για: {delete_months_text}."
+            )
+            if len(tx_rows) > 1:
+                st.warning(
+                    "Η συγκεκριμένη πληρωμή καλύπτει πολλούς μήνες. "
+                    "Η διαγραφή θα αφαιρέσει ΟΛΟΥΣ αυτούς τους μήνες "
+                    "της ίδιας συναλλαγής."
+                )
+            delete_confirm_key = f"tx_delete_confirm_{form_key}"
+            delete_confirmed = st.checkbox(
+                "Επιβεβαιώνω ότι θέλω να διαγράψω αυτή την πληρωμή",
+                key=delete_confirm_key,
+            )
+            delete_payment = st.button(
+                "🗑️ Οριστική διαγραφή πληρωμής",
+                disabled=not delete_confirmed,
+                use_container_width=True,
+                key=f"tx_delete_{form_key}",
+            )
+            if delete_payment:
+                try:
+                    # Re-read the exact transaction before deleting so a
+                    # concurrent change by another coach is never removed silently.
+                    current_rows = (
+                        sb.table("payments")
+                        .select(
+                            "id,player_id,coverage_month,payment_batch_id,"
+                            "paid_on,amount,note"
+                        )
+                        .eq("player_id", payment_player["id"])
+                        .in_("id", old_ids)
+                        .execute().data or []
+                    )
+                    if {r["id"] for r in current_rows} != set(old_ids):
+                        st.error(
+                            "Η πληρωμή άλλαξε στο μεταξύ. Ανανέωσε τη σελίδα "
+                            "πριν τη διαγράψεις."
+                        )
+                        st.stop()
+                    if tx["batch_id"]:
+                        batch_now = (
+                            sb.table("payments")
+                            .select("id")
+                            .eq("player_id", payment_player["id"])
+                            .eq("payment_batch_id", tx["batch_id"])
+                            .execute().data or []
+                        )
+                        if {r["id"] for r in batch_now} != set(old_ids):
+                            st.error(
+                                "Η συναλλαγή άλλαξε στο μεταξύ. Ανανέωσε τη "
+                                "σελίδα πριν τη διαγράψεις."
+                            )
+                            st.stop()
+
+                    sb.table("payments").delete().eq(
+                        "player_id", payment_player["id"]
+                    ).in_("id", old_ids).execute()
+
+                    still_there = (
+                        sb.table("payments")
+                        .select("id")
+                        .eq("player_id", payment_player["id"])
+                        .in_("id", old_ids)
+                        .execute().data or []
+                    )
+                    if still_there:
+                        raise RuntimeError("Payment delete verification failed")
+
+                    st.session_state.pop(delete_confirm_key, None)
+                    st.session_state["_payment_editor_new_pending"] = (
+                        payment_player["id"]
+                    )
+                    st.session_state["_payment_editor_reset"] = form_key
+                    set_flash("✅ Η πληρωμή διαγράφηκε επιτυχώς.")
+                    st.rerun()
+                except Exception:
+                    st.error(
+                        "Δεν ολοκληρώθηκε η διαγραφή. Έλεγξε το Ιστορικό "
+                        "πριν δοκιμάσεις ξανά."
+                    )
+
             if save_edit:
                 if not updated_months:
                     st.error("Επίλεξε τουλάχιστον έναν μήνα κάλυψης.")
