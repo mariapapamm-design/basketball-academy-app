@@ -3007,10 +3007,11 @@ elif page == "👥 Παίκτες":
                         ) == team_name
                     ]
 
-                    if team_rows or team_name in ("2012-2013", "2013"):
-                        teams_with_players.append(
-                            (team_name, team_rows)
-                        )
+                    # Show every configured team, even when it currently has 0 players.
+                    # This keeps sections such as Junior NBA visible at all times.
+                    teams_with_players.append(
+                        (team_name, team_rows)
+                    )
 
                 extra_teams = sorted(
                     {
