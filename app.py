@@ -1430,20 +1430,41 @@ def player_delete_dialog(player):
 
 
 def get_all_attendance():
-    return (
-        get_user_client()
-        .table("attendance")
-        .select(
-            "id,player_id,training_date,present,recorded_by,"
-            "players(full_name,team,jersey_number,photo_path),"
-            "profiles(full_name)"
+    """
+    Read ALL attendance rows safely.
+
+    The old code stopped at 10,000 rows, which could make newer
+    attendance records look as if they had disappeared even when
+    they were already stored in Supabase.
+    """
+    client = get_user_client()
+    rows = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+        batch = (
+            client.table("attendance")
+            .select(
+                "id,player_id,training_date,present,recorded_by,"
+                "players(full_name,team,jersey_number,photo_path),"
+                "profiles(full_name)"
+            )
+            .order("training_date")
+            .range(offset, offset + page_size - 1)
+            .execute()
+            .data
+            or []
         )
-        .order("training_date")
-        .limit(10000)
-        .execute()
-        .data
-        or []
-    )
+
+        rows.extend(batch)
+
+        if len(batch) < page_size:
+            break
+
+        offset += page_size
+
+    return rows
 
 
 def get_team_attendance(team):
@@ -1457,31 +1478,67 @@ def get_team_attendance(team):
 
 
 def save_attendance_status(player_id, training_date, present):
-    """Save ONLY one player/day. Never rewrite teammates' attendance."""
+    """
+    Save one player's attendance for one day.
+
+    If an older version of the app created more than one row for the
+    same player/day, update all of those rows to the same value instead
+    of aborting the whole team's save.
+    """
     client = get_user_client()
+    training_date_str = str(training_date)
+
     existing = (
         client.table("attendance")
         .select("id")
         .eq("player_id", player_id)
-        .eq("training_date", str(training_date))
-        .limit(2)
+        .eq("training_date", training_date_str)
         .execute()
-        .data or []
+        .data
+        or []
     )
-    if len(existing) > 1:
-        raise ValueError("Βρέθηκαν διπλές εγγραφές παρουσίας για τον παίκτη/ημέρα.")
+
     payload = {
         "present": bool(present),
         "recorded_by": st.session_state.user.id,
     }
+
     if existing:
-        client.table("attendance").update(payload).eq("id", existing[0]["id"]).execute()
+        (
+            client.table("attendance")
+            .update(payload)
+            .eq("player_id", player_id)
+            .eq("training_date", training_date_str)
+            .execute()
+        )
     else:
-        client.table("attendance").insert({
-            "player_id": player_id,
-            "training_date": str(training_date),
-            **payload,
-        }).execute()
+        (
+            client.table("attendance")
+            .insert({
+                "player_id": player_id,
+                "training_date": training_date_str,
+                **payload,
+            })
+            .execute()
+        )
+
+    # Immediate verification: never show "success" for a row that cannot
+    # be read back from Supabase.
+    check = (
+        client.table("attendance")
+        .select("id,present")
+        .eq("player_id", player_id)
+        .eq("training_date", training_date_str)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+
+    if not check:
+        raise RuntimeError(
+            "Η παρουσία δεν επιβεβαιώθηκε στη βάση δεδομένων."
+        )
 
 
 def render_single_attendance_editor(team_players, training_date, date_rows, prefix):
@@ -1519,7 +1576,7 @@ def render_single_attendance_editor(team_players, training_date, date_rows, pref
             save_attendance_status(
                 selected_id, training_date, selected_status == "✅ Παρών"
             )
-        except Exception:
+        except Exception as exc:
             st.error(f"Δεν αποθηκεύτηκε η αλλαγή: {exc}")
         else:
             set_flash("✅ Ενημερώθηκε μόνο ο επιλεγμένος παίκτης.")
@@ -3405,24 +3462,29 @@ elif page == "✅ Παρουσίες":
                 for p in team_players:
                     previous = date_rows.get(p["id"])
                     new_status = bool(presence[p["id"]])
-                    # On first save, record everybody, including absent players.
-                    # On subsequent saves, NEVER rewrite other players' records.
-                    if is_new_day or (
-                        previous is not None
-                        and bool(previous["present"]) != new_status
-                    ) or (previous is None and new_status):
-                        save_attendance_status(p["id"], training_date, new_status)
+                    # Always create a missing row, even for an absent player.
+                    # Existing rows are touched only when their status changed.
+                    if (
+                        previous is None
+                        or bool(previous["present"]) != new_status
+                    ):
+                        save_attendance_status(
+                            p["id"],
+                            training_date,
+                            new_status,
+                        )
                         changes += 1
-            except Exception:
+            except Exception as exc:
                 st.error(
                     "Η αποθήκευση δεν ολοκληρώθηκε για όλους. "
-                    "Ξαναφόρτωσε την ημέρα για να δεις ποιες αλλαγές αποθηκεύτηκαν "
-                    "και προσπάθησε ξανά. " + str(exc)
+                    "Δεν εμφανίζουμε ψεύτικη επιβεβαίωση. "
+                    "Λεπτομέρεια: " + str(exc)
                 )
             else:
                 set_flash(
-                    f"✅ Αποθηκεύτηκαν {changes} καταχωρήσεις/αλλαγές για "
-                    f"{training_date.strftime('%d/%m/%Y')}."
+                    f"✅ Οι παρουσίες αποθηκεύτηκαν επιτυχώς για "
+                    f"{training_date.strftime('%d/%m/%Y')} "
+                    f"({changes} καταχωρήσεις/αλλαγές)."
                 )
                 st.rerun()
 
