@@ -2682,6 +2682,46 @@ elif page == "👥 Παίκτες":
                 index=size_index,
             )
 
+            edit_address = st.text_input(
+                "Διεύθυνση",
+                value=selected.get("address") or "",
+            )
+
+            edit_home_phone = st.text_input(
+                "Τηλέφωνο οικίας",
+                value=selected.get("home_phone") or "",
+            )
+
+            edit_father_full_name = st.text_input(
+                "Ονοματεπώνυμο πατέρα",
+                value=selected.get("father_full_name") or "",
+            )
+
+            edit_father_mobile = st.text_input(
+                "Κινητό πατέρα",
+                value=selected.get("father_mobile") or "",
+            )
+
+            edit_mother_full_name = st.text_input(
+                "Ονοματεπώνυμο μητέρας",
+                value=selected.get("mother_full_name") or "",
+            )
+
+            edit_mother_mobile = st.text_input(
+                "Κινητό μητέρας",
+                value=selected.get("mother_mobile") or "",
+            )
+
+            edit_player_email = st.text_input(
+                "e-mail",
+                value=selected.get("email") or "",
+            )
+
+            edit_school = st.text_input(
+                "Σχολείο",
+                value=selected.get("school") or "",
+            )
+
             st.markdown("#### Έγγραφα αθλητή")
 
             edit_athlete_card = st.checkbox(
@@ -2820,6 +2860,38 @@ elif page == "👥 Παίκτες":
                                 None
                                 if edit_size == "-"
                                 else edit_size
+                            ),
+                            "address": (
+                                edit_address.strip()
+                                or None
+                            ),
+                            "home_phone": (
+                                edit_home_phone.strip()
+                                or None
+                            ),
+                            "father_full_name": (
+                                edit_father_full_name.strip()
+                                or None
+                            ),
+                            "father_mobile": (
+                                edit_father_mobile.strip()
+                                or None
+                            ),
+                            "mother_full_name": (
+                                edit_mother_full_name.strip()
+                                or None
+                            ),
+                            "mother_mobile": (
+                                edit_mother_mobile.strip()
+                                or None
+                            ),
+                            "email": (
+                                edit_player_email.strip()
+                                or None
+                            ),
+                            "school": (
+                                edit_school.strip()
+                                or None
                             ),
                             "athlete_card_received": bool(
                                 edit_athlete_card
