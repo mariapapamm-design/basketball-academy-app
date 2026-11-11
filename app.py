@@ -3001,9 +3001,9 @@ elif page == "👥 Παίκτες":
 
             with search_col:
                 player_search = st.text_input(
-                    "Όνομα ή νούμερο φανέλας",
+                    "Αναζήτηση σε όλα τα στοιχεία παίκτη",
                     key="players_global_search",
-                    placeholder="π.χ. Παπαδόπουλος ή 23",
+                    placeholder="π.χ. όνομα, κινητό γονέα, e-mail, σχολείο, διεύθυνση...",
                     label_visibility="collapsed",
                 )
 
@@ -3111,8 +3111,22 @@ elif page == "👥 Παίκτες":
                     searchable = " ".join(
                         [
                             str(p.get("full_name") or ""),
-                            str(p.get("jersey_number") or ""),
+                            str(p.get("birth_date") or ""),
+                            str(format_birth_year(p.get("birth_date")) or ""),
                             str(p.get("team") or ""),
+                            str(team_display_name(p.get("team")) or ""),
+                            str(p.get("jersey_number") or ""),
+                            str(p.get("jersey_size") or ""),
+                            str(p.get("address") or ""),
+                            str(p.get("home_phone") or ""),
+                            str(p.get("father_full_name") or ""),
+                            str(p.get("father_mobile") or ""),
+                            str(p.get("mother_full_name") or ""),
+                            str(p.get("mother_mobile") or ""),
+                            str(p.get("email") or ""),
+                            str(p.get("school") or ""),
+                            str(p.get("health_card_received_on") or ""),
+                            str(p.get("notes") or ""),
                         ]
                     )
 
