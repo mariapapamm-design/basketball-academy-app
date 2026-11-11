@@ -3157,6 +3157,38 @@ elif page == "👥 Παίκτες":
                     )
                 )
 
+                address = st.text_input(
+                    "Διεύθυνση"
+                )
+
+                home_phone = st.text_input(
+                    "Τηλέφωνο οικίας"
+                )
+
+                father_full_name = st.text_input(
+                    "Ονοματεπώνυμο πατέρα"
+                )
+
+                father_mobile = st.text_input(
+                    "Κινητό πατέρα"
+                )
+
+                mother_full_name = st.text_input(
+                    "Ονοματεπώνυμο μητέρας"
+                )
+
+                mother_mobile = st.text_input(
+                    "Κινητό μητέρας"
+                )
+
+                player_email = st.text_input(
+                    "e-mail"
+                )
+
+                school = st.text_input(
+                    "Σχολείο"
+                )
+
                 st.markdown("#### Έγγραφα αθλητή")
 
                 athlete_card_received = st.checkbox(
@@ -3249,6 +3281,38 @@ elif page == "👥 Παίκτες":
                                     None
                                     if jersey_size == "-"
                                     else jersey_size
+                                ),
+                                "address": (
+                                    address.strip()
+                                    or None
+                                ),
+                                "home_phone": (
+                                    home_phone.strip()
+                                    or None
+                                ),
+                                "father_full_name": (
+                                    father_full_name.strip()
+                                    or None
+                                ),
+                                "father_mobile": (
+                                    father_mobile.strip()
+                                    or None
+                                ),
+                                "mother_full_name": (
+                                    mother_full_name.strip()
+                                    or None
+                                ),
+                                "mother_mobile": (
+                                    mother_mobile.strip()
+                                    or None
+                                ),
+                                "email": (
+                                    player_email.strip()
+                                    or None
+                                ),
+                                "school": (
+                                    school.strip()
+                                    or None
                                 ),
                                 "athlete_card_received": bool(
                                     athlete_card_received
